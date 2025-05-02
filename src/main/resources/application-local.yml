@@ -1,0 +1,58 @@
+spring:
+  datasource:
+    url: jdbc:yugabytedb://127.0.0.2:5433/acdc
+    username: yugabyte
+    password: yugabyte
+    driver-class-name: org.postgresql.Driver
+
+producer:
+  name: cdc-source
+  connector-class: io.debezium.connector.postgresql.YugabyteDBConnector
+  offset-storage-jdbc-url: jdbc:postgresql://127.0.0.2:5433:5433/acdc
+  offset-storage-jdbc-user: yugabyte
+  offset-storage-jdbc-password: yugabyte
+  offset-storage-jdbc-driver: org.postgresql.Driver
+  offset-storage-jdbc-table: cdc_offsets
+  offset-storage-jdbc-schema: public
+  offset-flush-interval-ms: 10000
+  hostname: 127.0.0.2
+  port: 5433
+  user: yugabyte
+  password: yugabyte
+  db-name: acdc
+  plugin-name: yboutput
+  replication-slot: ybdb
+  table-list: public.products,public.orders,public.users,public.reviews
+  schema-list: public
+  server-id: ybdb
+  server-name: ybdb
+  publication-mode: filtered
+  publication-name: ybdb
+  task-max: 4
+  topic-prefix: ybdb
+  timestamp-precision-mode: adaptive_time_microseconds
+  log-errors-include-messages: true
+  poll-interval-ms: 100
+  max-batch-size: 5000
+  max-queue-size: 10000
+  executor-threads: 1
+  enable-async: false
+  replica-identity: public.*:FULL
+consumer:
+  queue-capacity: 100
+  batch-size: 500
+  enable-batch: true
+  flush-interval-ms: 2000
+
+retry:
+  max-attempts: 5
+  multiplier: 3
+  initial-interval-in-ms: 500
+  max-interval-in-ms: 30000
+
+
+
+
+
+
+
