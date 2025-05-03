@@ -2,7 +2,7 @@ package io.cdc.stream.event;
 
 import io.cdc.stream.config.ConsumerConfig;
 import io.cdc.stream.config.ProducerConfig;
-import io.cdc.stream.handler.TableHandler;
+import io.cdc.stream.handler.EntityHandler;
 import io.debezium.engine.DebeziumEngine;
 import io.debezium.engine.RecordChangeEvent;
 import java.util.HashMap;
@@ -19,7 +19,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class ChangeEventDispatcher {
 
-	private final Map<String, TableHandler> handlers = new HashMap<>();
+	private final Map<String, EntityHandler> handlers = new HashMap<>();
 
 	private static final String IGNORE_EVENT = "debezium-heartbeat";
 
@@ -35,7 +35,7 @@ public class ChangeEventDispatcher {
 		this.executor = Executors.newFixedThreadPool(this.producerConfig.getExecutorThreads());
 	}
 
-	public void registerHandler(String tableName, TableHandler handler) {
+	public void registerHandler(String tableName, EntityHandler handler) {
 		handlers.put(tableName, handler);
 	}
 

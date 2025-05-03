@@ -4,9 +4,11 @@ import io.cdc.stream.config.ConsumerConfig;
 import io.cdc.stream.entity.Base;
 import io.cdc.stream.event.OPERATION;
 import io.cdc.stream.mapper.EntityMapper;
+import io.cdc.stream.service.PersistentService;
 import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -15,9 +17,11 @@ import org.apache.kafka.connect.data.Struct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public abstract class TableHandler<T extends Base> {
+import org.springframework.retry.support.RetryTemplate;
 
-	private final static Logger log = LoggerFactory.getLogger(TableHandler.class);
+public abstract class EntityHandler<T extends Base> {
+
+	private final static Logger log = LoggerFactory.getLogger(EntityHandler.class);
 
 	private static final String OP = "op";
 
@@ -29,6 +33,10 @@ public abstract class TableHandler<T extends Base> {
 
 	protected final ConsumerConfig config;
 
+	protected final RetryTemplate retryTemplate;
+
+	protected final PersistentService<T> service;
+
 	private final EntityMapper entityMapper = new EntityMapper();
 
 	private final BlockingQueue<T> queue;
@@ -37,8 +45,10 @@ public abstract class TableHandler<T extends Base> {
 
 	private final int FLUSH_INTERVAL_MS;
 
-	protected TableHandler(ConsumerConfig cfg) {
+	EntityHandler(ConsumerConfig cfg, RetryTemplate template, PersistentService<T> svc) {
 		config = cfg;
+		retryTemplate = template;
+		service = svc;
 		queue = new ArrayBlockingQueue<>(config.getQueueCapacity());
 		MAX_BATCH_SIZE = config.getBatchSize();
 		FLUSH_INTERVAL_MS = config.getFlushIntervalMs();
@@ -127,7 +137,7 @@ public abstract class TableHandler<T extends Base> {
 		}
 	}
 
-	protected void offer(OPERATION key, T value) throws InterruptedException {
+	final void offer(OPERATION key, T value) throws InterruptedException {
 		value.operation(key);
 		queue.put(value);
 	}
@@ -160,13 +170,33 @@ public abstract class TableHandler<T extends Base> {
 		}
 	}
 
-	protected abstract void delete(T entity);
+	protected void delete(T entity) {
+		retryTemplate.execute(ctx -> {
+			service.delete(entity);
+			return Optional.empty();
+		});
+	}
 
-	protected abstract void save(T entity);
+	protected void save(T entity) {
+		retryTemplate.execute(ctx -> {
+			service.save(entity);
+			return Optional.empty();
+		});
+	}
 
-	protected abstract void save(List<T> objects);
+	protected void save(List<T> entityList) {
+		retryTemplate.execute(ctx -> {
+			service.save(entityList);
+			return Optional.empty();
+		});
+	}
 
-	protected abstract void delete(List<T> objects);
+	protected void delete(List<T> entityList) {
+		retryTemplate.execute(ctx -> {
+			service.delete(entityList);
+			return Optional.empty();
+		});
+	}
 
 	public abstract void handle(Struct payload);
 
