@@ -19,24 +19,34 @@ import lombok.experimental.Accessors;
 @AllArgsConstructor
 @NoArgsConstructor
 public class Products extends Base {
+
 	@Id
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	Long id;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String category;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String ean;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	BigDecimal price;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	@JsonSetter(nulls = Nulls.SKIP)
 	int quantity;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	BigDecimal rating;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String title;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String vendor;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	Instant createdAt;
+
 }

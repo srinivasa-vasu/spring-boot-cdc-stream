@@ -18,6 +18,7 @@ import java.time.format.DateTimeFormatter;
 public class KeyValueDeserializer extends JsonDeserializer<Object> implements ContextualDeserializer {
 
 	private static final String VALUE_FIELD = "value";
+
 	private JavaType targetType;
 
 	public KeyValueDeserializer() {
@@ -33,7 +34,8 @@ public class KeyValueDeserializer extends JsonDeserializer<Object> implements Co
 		JsonNode node = mapper.readTree(p);
 		JsonNode valueNode = node.get(VALUE_FIELD);
 
-		if (valueNode == null || valueNode.isNull()) return null;
+		if (valueNode == null || valueNode.isNull())
+			return null;
 
 		if (targetType.hasRawClass(Instant.class)) {
 			if (valueNode.isNumber()) {
@@ -71,5 +73,5 @@ public class KeyValueDeserializer extends JsonDeserializer<Object> implements Co
 		JavaType type = property.getType();
 		return new KeyValueDeserializer(type);
 	}
-}
 
+}

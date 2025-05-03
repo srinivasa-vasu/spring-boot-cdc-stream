@@ -36,3 +36,4 @@ build/
 /mvnw
 /mvnw.cmd
 /lib/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar
+/. springjavaformatconfig

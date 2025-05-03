@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 public class ProductHandler extends TableHandler<Products> {
 
 	private final PersistentService<Products> service;
+
 	private final RetryTemplate retryTemplate;
 
 	public ProductHandler(ProductService service, ConsumerConfig config, RetryTemplate retryTemplate) {
@@ -66,7 +67,7 @@ public class ProductHandler extends TableHandler<Products> {
 		handleQueue(payload, Products.class);
 	}
 
-	//	@Scheduled(fixedDelay = 1000)
+	// @Scheduled(fixedDelay = 1000)
 	@PostConstruct
 	public void processQueue() {
 		executors.submit(() -> processQueue(Products.class));

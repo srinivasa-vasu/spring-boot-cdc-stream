@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 public class OrderHandler extends TableHandler<Orders> {
 
 	private final OrderService service;
+
 	private final RetryTemplate retryTemplate;
 
 	public OrderHandler(OrderService service, ConsumerConfig config, RetryTemplate retryTemplate) {
@@ -54,7 +55,6 @@ public class OrderHandler extends TableHandler<Orders> {
 			return Optional.empty();
 		});
 	}
-
 
 	@Override
 	public void handle(Struct payload) {

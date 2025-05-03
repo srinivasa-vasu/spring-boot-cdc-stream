@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 public class ReviewHandler extends TableHandler<Reviews> {
 
 	private final ReviewService service;
+
 	private final RetryTemplate retryTemplate;
 
 	public ReviewHandler(ReviewService service, ConsumerConfig config, RetryTemplate retryTemplate) {

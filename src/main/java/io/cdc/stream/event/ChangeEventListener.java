@@ -23,15 +23,17 @@ import org.springframework.stereotype.Component;
 public class ChangeEventListener {
 
 	private final static Logger log = LoggerFactory.getLogger(ChangeEventListener.class);
+
 	private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
 	private final DebeziumEngine<RecordChangeEvent<SourceRecord>> changeEventEngine;
 
 	public ChangeEventListener(ChangeEventDispatcher dispatcher, Configuration config) {
 
 		this.changeEventEngine = DebeziumEngine.create(ChangeEventFormat.of(Connect.class))
-				.using(config.asProperties())
-				.notifying(dispatcher::handleBatch)
-				.build();
+			.using(config.asProperties())
+			.notifying(dispatcher::handleBatch)
+			.build();
 	}
 
 	@PostConstruct
@@ -39,11 +41,11 @@ public class ChangeEventListener {
 		this.executor.execute(this::failSafeRun);
 	}
 
-	@Retryable(
-			retryFor = {Throwable.class}, recover = "recoverEventListenerFailure",
+	@Retryable(retryFor = { Throwable.class }, recover = "recoverEventListenerFailure",
 			maxAttemptsExpression = "#{retryConfig.maxAttempts:3})",
 			backoff = @Backoff(delayExpression = "#{retryConfig.maxAttempts:1000})",
-					multiplierExpression = "#{retryConfig.multiplier:3})", maxDelayExpression = "#{retryConfig.maxIntervalInMs:20000})"))
+					multiplierExpression = "#{retryConfig.multiplier:3})",
+					maxDelayExpression = "#{retryConfig.maxIntervalInMs:20000})"))
 	public void failSafeRun() {
 		try {
 			log.info("Starting change event listener!");
@@ -72,4 +74,5 @@ public class ChangeEventListener {
 		}
 		log.info("Stopped change event listener!");
 	}
+
 }

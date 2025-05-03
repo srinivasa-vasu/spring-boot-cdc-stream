@@ -18,17 +18,24 @@ import lombok.experimental.Accessors;
 @AllArgsConstructor
 @NoArgsConstructor
 public class Reviews extends Base {
+
 	@Id
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	Long id;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String reviewer;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	BigInteger productId;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	BigDecimal rating;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	String body;
+
 	@JsonDeserialize(using = KeyValueDeserializer.class)
 	Instant createdAt;
+
 }

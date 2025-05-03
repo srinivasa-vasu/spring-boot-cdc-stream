@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 public class UserHandler extends TableHandler<Users> {
 
 	private final UserService service;
+
 	private final RetryTemplate retryTemplate;
 
 	public UserHandler(UserService service, ConsumerConfig config, RetryTemplate retryTemplate) {
@@ -54,7 +55,6 @@ public class UserHandler extends TableHandler<Users> {
 			return Optional.empty();
 		});
 	}
-
 
 	@Override
 	public void handle(Struct payload) {

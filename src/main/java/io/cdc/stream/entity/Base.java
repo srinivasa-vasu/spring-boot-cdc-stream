@@ -10,6 +10,8 @@ import lombok.experimental.Accessors;
 @Getter
 @Accessors(fluent = true)
 public class Base {
+
 	@Transient
 	OPERATION operation;
+
 }

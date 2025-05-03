@@ -18,7 +18,9 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class ChangeEventHandlerRegistry implements ApplicationContextAware {
+
 	private final ChangeEventDispatcher dispatcher;
+
 	private static ApplicationContext context;
 
 	public ChangeEventHandlerRegistry(ChangeEventDispatcher dispatcher) {
@@ -37,4 +39,5 @@ public class ChangeEventHandlerRegistry implements ApplicationContextAware {
 	public void setApplicationContext(@NonNull ApplicationContext ac) throws BeansException {
 		context = ac;
 	}
+
 }

@@ -21,8 +21,10 @@ public class PersistentRetryPolicy extends ExceptionClassifierRetryPolicy {
 
 	// 40001 - optimistic concurrency or serialization_failure
 	// 40P01 - deadlock
-	// 08006 - connection issues (error sending data back);"kill -9" failures, socket timeouts
-	// 57P01 - broken pool conn (invalidated connections because of node-failure, node-restart, etc.);"kill -15" failures
+	// 08006 - connection issues (error sending data back);"kill -9" failures, socket
+	// timeouts
+	// 57P01 - broken pool conn (invalidated connections because of node-failure,
+	// node-restart, etc.);"kill -15" failures
 	// XX000 - RPC failures (could be intermittent)
 	private final String SQL_STATE = "^(40001)|(40P01)|(57P01)|(08006)";
 
@@ -37,14 +39,16 @@ public class PersistentRetryPolicy extends ExceptionClassifierRetryPolicy {
 	private final org.springframework.retry.RetryPolicy np = new NeverRetryPolicy();
 
 	private final Predicate<SQLException> sqlStatePredicate = exception -> Optional.ofNullable(exception.getSQLState())
-			.filter(state -> (state.matches(SQL_STATE) || (errorCodes.containsKey(exception.getSQLState()) && (
-					Optional.ofNullable(exception.getMessage())
-							.filter(msg -> msg.contains(errorCodes.get(exception.getSQLState()))).isPresent()))))
-			.isPresent();
+		.filter(state -> (state.matches(SQL_STATE)
+				|| (errorCodes.containsKey(exception.getSQLState()) && (Optional.ofNullable(exception.getMessage())
+					.filter(msg -> msg.contains(errorCodes.get(exception.getSQLState())))
+					.isPresent()))))
+		.isPresent();
 
-	private final Predicate<SQLException> sqlMsgPredicate = exception ->
-			Optional.ofNullable(exception.getMessage()).map(String::toLowerCase).filter(msg -> msg.matches(SQL_MSG))
-					.isPresent();
+	private final Predicate<SQLException> sqlMsgPredicate = exception -> Optional.ofNullable(exception.getMessage())
+		.map(String::toLowerCase)
+		.filter(msg -> msg.matches(SQL_MSG))
+		.isPresent();
 
 	// SQLTransientConnectionException: (08001)|(08003)
 	// - intermittent issues because of a backend failure like connection refused
@@ -64,8 +68,8 @@ public class PersistentRetryPolicy extends ExceptionClassifierRetryPolicy {
 	public void init() {
 		this.setExceptionClassifier(cause -> {
 			do {
-				if (exceptionPredicate.test(cause) || (cause instanceof SQLException exception && (sqlStatePredicate.or(sqlMsgPredicate)
-						.test(exception)))) {
+				if (exceptionPredicate.test(cause) || (cause instanceof SQLException exception
+						&& (sqlStatePredicate.or(sqlMsgPredicate).test(exception)))) {
 					return sp;
 				}
 				cause = cause.getCause();

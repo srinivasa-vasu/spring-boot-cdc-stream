@@ -20,9 +20,13 @@ import org.springframework.stereotype.Component;
 public class ChangeEventDispatcher {
 
 	private final Map<String, TableHandler> handlers = new HashMap<>();
+
 	private static final String IGNORE_EVENT = "debezium-heartbeat";
+
 	private final ExecutorService executor;
+
 	private final ProducerConfig producerConfig;
+
 	private final ConsumerConfig consumerConfig;
 
 	public ChangeEventDispatcher(ProducerConfig producerConfig, ConsumerConfig consumerConfig) {
@@ -67,4 +71,5 @@ public class ChangeEventDispatcher {
 		}
 		committer.markBatchFinished();
 	}
+
 }

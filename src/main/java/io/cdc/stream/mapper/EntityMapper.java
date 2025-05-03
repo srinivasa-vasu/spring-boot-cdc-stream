@@ -12,9 +12,9 @@ import org.apache.kafka.connect.data.Struct;
 public class EntityMapper {
 
 	private static final ObjectMapper objectMapper = new ObjectMapper()
-			.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-			.setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
-			.registerModule(new JavaTimeModule());
+		.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+		.setPropertyNamingStrategy(com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE)
+		.registerModule(new JavaTimeModule());
 
 	private static final String SKIP_FIELD = "set";
 
@@ -47,4 +47,5 @@ public class EntityMapper {
 		}
 		return result;
 	}
+
 }
