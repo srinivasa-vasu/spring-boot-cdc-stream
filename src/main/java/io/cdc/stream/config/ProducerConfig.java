@@ -48,6 +48,7 @@ public class ProducerConfig {
 	private int executorThreads;
 	private boolean enableAsync;
 	private String replicaIdentity;
+	private String snapshotMode;
 
 
 	@Bean
@@ -84,6 +85,7 @@ public class ProducerConfig {
 				.with("poll.interval.ms", pollIntervalMs)
 				.with("max.batch.size", maxBatchSize)
 				.with("max.queue.size", maxQueueSize)
+				.with("snapshot.mode", snapshotMode)
 				.build();
 	}
 
