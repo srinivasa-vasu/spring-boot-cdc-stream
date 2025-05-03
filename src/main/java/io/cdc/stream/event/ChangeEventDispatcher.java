@@ -31,7 +31,6 @@ public class ChangeEventDispatcher {
 		this.executor = Executors.newFixedThreadPool(this.producerConfig.getExecutorThreads());
 	}
 
-
 	public void registerHandler(String tableName, TableHandler handler) {
 		handlers.put(tableName, handler);
 	}

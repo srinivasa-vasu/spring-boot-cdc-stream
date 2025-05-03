@@ -3,7 +3,7 @@ spring:
     url: jdbc:yugabytedb://127.0.0.2:5433/acdc
     username: yugabyte
     password: yugabyte
-    driver-class-name: org.postgresql.Driver
+    driver-class-name: com.yugabyte.Driver
 
 producer:
   name: cdc-source
@@ -43,6 +43,7 @@ consumer:
   batch-size: 500
   enable-batch: true
   flush-interval-ms: 2000
+  drain-interval-ms: 120000
 
 retry:
   max-attempts: 5
