@@ -83,7 +83,7 @@ public class ProducerConfig {
 
 	private String replicaIdentity;
 
-	private String snapshotMode = "initial";
+	private String snapshotMode;
 
 	@Bean
 	public io.debezium.config.Configuration ybSourceConnector(Environment env) throws IOException {

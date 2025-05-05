@@ -38,6 +38,7 @@ producer:
   executor-threads: 1
   enable-async: false
   replica-identity: public.*:FULL
+  snapshot-mode: initial
 consumer:
   queue-capacity: 100
   batch-size: 500
