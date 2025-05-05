@@ -62,9 +62,9 @@ Update the `application-[profile].yml` file located in `src/main/resources/` wit
 
 ## Step 4: Build and Run the Application
 ```sh
-mvn clean install
+mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] clean install
 
-mvn -DskipTests spring-boot:run -Dspring.profiles.active=[REPLACE_PROFILE]
+mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] spring-boot:run 
 ```
 
 ## Step 5: Verify CDC Functionality

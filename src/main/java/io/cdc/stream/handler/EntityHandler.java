@@ -18,7 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.retry.support.RetryTemplate;
+import org.springframework.stereotype.Component;
 
+@Component
 public abstract class EntityHandler<T extends Base> {
 
 	private final static Logger log = LoggerFactory.getLogger(EntityHandler.class);
