@@ -28,6 +28,7 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<debz.version>2.5.2.Final</debz.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -42,19 +43,25 @@
 		<dependency>
 			<groupId>io.debezium</groupId>
 			<artifactId>debezium-embedded</artifactId>
-			<version>2.5.2.Final</version>
+			<version>${debz.version}</version>
 		</dependency>
 
 		<dependency>
 			<groupId>io.debezium</groupId>
 			<artifactId>debezium-api</artifactId>
-			<version>2.5.2.Final</version>
+			<version>${debz.version}</version>
 		</dependency>
 
 		<dependency>
 			<groupId>io.debezium</groupId>
 			<artifactId>debezium-storage-jdbc</artifactId>
-			<version>2.5.2.Final</version>
+			<version>${debz.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>io.debezium</groupId>
+			<artifactId>debezium-yugabyte</artifactId>
+			<version>${debz.version}</version>
 		</dependency>
 
 		<dependency>
@@ -67,13 +74,13 @@
 			<artifactId>spring-retry</artifactId>
 		</dependency>
 
-		<dependency>
-			<groupId>com.yugabyte.cdc</groupId>
-			<artifactId>debezium-connector-yugabytedb</artifactId>
-			<version>1.0</version>
-			<scope>system</scope>
-			<systemPath>${project.basedir}/lib/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar</systemPath>
-		</dependency>
+<!--		<dependency>-->
+<!--			<groupId>com.yugabyte.cdc</groupId>-->
+<!--			<artifactId>debezium-connector-yugabytedb</artifactId>-->
+<!--			<version>1.0</version>-->
+<!--			<scope>system</scope>-->
+<!--			<systemPath>${project.basedir}/lib/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar</systemPath>-->
+<!--		</dependency>-->
 
 		<dependency>
 			<groupId>org.postgresql</groupId>

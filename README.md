@@ -20,20 +20,54 @@ You can find the complete source at [GitHub](https://github.com/srinivasa-vasu/s
 
 ```sh
 git clone [REPO]
+
+cd spring-boot-cdc-stream
 ```
 
-## Step 2: Configure the Application
+## Step 2: Install YBDB Debezium connector
+
+```sh
+# download the ybdb connector jar
+wget https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2024.2.3/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar
+
+# create ybdb pom
+cat > debezium-yugabyte-2.5.2.Final.pom << EOF
+<project xmlns="http://maven.apache.org/POM/4.0.0" 
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io.debezium</groupId>
+    <artifactId>debezium-yugabyte</artifactId>
+    <version>2.5.2.Final</version>
+    <description>YugabyteDB Debezium Connector</description>
+    <packaging>jar</packaging>
+</project>
+EOF
+
+# install connector to the local repo
+mvn install:install-file \
+  -Dfile=debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar \
+  -DpomFile=debezium-yugabyte-2.5.2.Final.pom \
+  -DgroupId=io.debezium \
+  -DartifactId=debezium-yugabyte \
+  -Dversion=2.5.2.Final \
+  -Dpackaging=jar
+
+```
+
+## Step 3: Configure the Application
 
 Update the `application-[profile].yml` file located in `src/main/resources/` with producer, consumer and datasource connection details.
 
-## Step 3: Build and Run the Application
+## Step 4: Build and Run the Application
 ```sh
 mvn clean install
 
 mvn -DskipTests spring-boot:run -Dspring.profiles.active=[REPLACE_PROFILE]
 ```
 
-## Step 4: Verify CDC Functionality
+## Step 5: Verify CDC Functionality
 
 To test the CDC pipeline:
 - Insert or update data in the source database.
