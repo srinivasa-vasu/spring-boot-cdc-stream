@@ -58,12 +58,12 @@ public abstract class EntityHandler<T extends Base> {
 
 	final void handle(Struct payload, Class<T> entityClass) {
 		switch (OPERATION.valueOf(payload.getString(OP))) {
-			case OPERATION.c, OPERATION.u, OPERATION.r ->
+		case OPERATION.c, OPERATION.u, OPERATION.r ->
 				save(entityMapper.mapStructToEntity(payload.getStruct(AFTER), entityClass));
-			case OPERATION.d -> delete(entityMapper.mapStructToEntity(payload.getStruct(BEFORE), entityClass));
-			default -> {
-				log.warn("Unsupported operation: {}", payload.getString(OP));
-			}
+		case OPERATION.d -> delete(entityMapper.mapStructToEntity(payload.getStruct(BEFORE), entityClass));
+		default -> {
+			log.warn("Unsupported operation: {}", payload.getString(OP));
+		}
 		}
 	}
 
@@ -71,12 +71,12 @@ public abstract class EntityHandler<T extends Base> {
 		try {
 			OPERATION operation = OPERATION.valueOf(payload.getString(OP));
 			switch (operation) {
-				case OPERATION.c, OPERATION.u, OPERATION.r ->
+			case OPERATION.c, OPERATION.u, OPERATION.r ->
 					offer(operation, entityMapper.mapStructToEntity(payload.getStruct(AFTER), entityClass));
-				case OPERATION.d ->
+			case OPERATION.d ->
 					offer(operation, entityMapper.mapStructToEntity(payload.getStruct(BEFORE), entityClass));
-				default -> {
-				}
+			default -> {
+			}
 			}
 		}
 		catch (InterruptedException e) {
