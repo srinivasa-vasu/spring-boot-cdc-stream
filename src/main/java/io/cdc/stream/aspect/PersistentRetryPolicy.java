@@ -8,9 +8,9 @@ import java.sql.SQLTransientConnectionException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
-import org.hibernate.TransactionException;
 
 import org.springframework.dao.TransientDataAccessException;
+import org.springframework.transaction.TransactionException;
 import org.springframework.retry.policy.ExceptionClassifierRetryPolicy;
 import org.springframework.retry.policy.NeverRetryPolicy;
 import org.springframework.retry.policy.SimpleRetryPolicy;

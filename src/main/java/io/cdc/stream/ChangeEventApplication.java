@@ -6,12 +6,15 @@ import io.cdc.stream.config.RetryConfig;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.retry.annotation.EnableRetry;
 import org.springframework.retry.backoff.ExponentialBackOffPolicy;
 import org.springframework.retry.support.RetryTemplate;
 
+/**
+ * Retry is used programmatically through the {@link RetryTemplate} below, so
+ * {@code @EnableRetry} is not needed. Re-adding it — or any {@code @Retryable} method —
+ * requires {@code spring-boot-starter-aop} on the classpath for AspectJ's annotations.
+ */
 @SpringBootApplication
-@EnableRetry
 public class ChangeEventApplication {
 
 	public static void main(String[] args) {

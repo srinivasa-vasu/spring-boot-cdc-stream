@@ -72,4 +72,78 @@ mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] spring-boot:run
 To test the CDC pipeline:
 - Insert or update data in the source database.
 
+## How the apply side works
+
+Changes are applied by a single-threaded, schema-driven path. There are no per-table queues
+and no worker pool: the replication slot already delivers changes in commit order and the
+embedded engine invokes the consumer on one thread, so concurrency on the apply side would
+only discard a guarantee that already exists. Statements are generated from each record's
+own Connect schema and cached, which is what allows a new source column to flow through
+without a code change.
+
+Throughput comes from batching and coarser commits, not parallelism. Adjacent rows that
+share a statement are coalesced into one JDBC batch — never reordered — and
+`consumer.transactions-per-commit` groups several adjacent source transactions into one sink
+commit.
+
+### Commit granularity
+
+`consumer.enable-transaction-boundary` selects what commits as one unit:
+
+| | `false` | `true` |
+|---|---|---|
+| Source order | preserved | preserved |
+| Commit unit | `batch-size` rows | one source transaction |
+| Partial transaction visible in the sink? | yes | **no** |
+| Requires `producer.provide-transaction-metadata` | no | **yes** |
+
+With the flag on, rows are buffered until the transaction's END marker and committed
+together, so a reader of the sink never observes half a source transaction. A transaction
+that spans several engine batches stays buffered; its offsets are never marked, so an
+incomplete transaction is re-delivered rather than half-applied. The initial snapshot emits
+no transaction markers and falls back to size-based flushing.
+
+Offsets advance only after the rows have committed. Alongside them, an LSN watermark is
+written to `consumer.apply-state-table` **inside the same transaction as the rows**, so a
+replay after a crash is recognised and skipped — Debezium's own offset store is flushed
+asynchronously and always lags the apply.
+
+### Schema changes (DDL)
+
+PostgreSQL and YugabyteDB logical decoding emit no DDL events, so there is no DDL stream to
+subscribe to. Instead, every change event carries its Connect schema, and that schema lists
+all columns of the table regardless of which ones the row changed. A change in the derived
+fingerprint is therefore a reliable signal that the source was altered, and diffing it
+against the sink's real columns yields the DDL to apply.
+
+With `consumer.schema-evolution: basic`:
+
+| Source change | Sink |
+|---|---|
+| `ADD COLUMN` | `ADD COLUMN` (nullable — existing sink rows have no value for it) |
+| Lossless type widening (`int4`→`int8`, `varchar`→`text`, …) | `ALTER COLUMN ... TYPE` |
+| Narrowing or incompatible type change | **pipeline halts** with the column named |
+| `DROP COLUMN` | column kept, `NOT NULL` dropped (set `allow-column-drop` to propagate) |
+| New table already in `table-list` | `CREATE TABLE` from the record schema, PK from the record key |
+
+Halting on an unsafe change is deliberate: there is no automatic answer that is safe, and
+stopping visibly beats truncating silently.
+
+### Adding a table to the capture set
+
+Adding a table is not fully automatic, and the reasons are on the source side:
+
+1. Add it to `producer.table-list` and **restart** — Debezium reconciles the publication at
+   connector startup only.
+2. `snapshot-mode: initial` does not re-snapshot once offsets exist, so a table that already
+   holds rows needs an incremental snapshot. Create the signalling table and set
+   `producer.signal-data-collection` (commented example in `application-local.yml`).
+3. Check the replica identity. `replica.identity.autoset.values` is applied at startup, and
+   in YugabyteDB the replica identity is captured when the replication slot is created — a
+   table created afterwards picks up the server default instead, and an existing slot may
+   need to be recreated to get `FULL`. Verify this against your YugabyteDB version.
+
+The sink side needs no code change: the table is created from the record schema on first
+event.
+
 

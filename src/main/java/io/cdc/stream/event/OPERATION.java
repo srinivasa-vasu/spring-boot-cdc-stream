@@ -2,6 +2,17 @@ package io.cdc.stream.event;
 
 public enum OPERATION {
 
-	c, u, d, r
+	/** create */
+	c,
+	/** update */
+	u,
+	/** delete */
+	d,
+	/** snapshot read */
+	r,
+	/** truncate */
+	t,
+	/** logical decoding message — carries no row */
+	m
 
 }

@@ -1,4 +1,11 @@
-# consumer
+# ---------------------------------------------------------------------------
+# sink (apply side)
+#
+# WARNING: this points at the same database as the producer below, so the app
+# captures the very tables it writes to. Every apply generates a new change
+# event, which is captured and applied again -- a feedback loop. Point this at a
+# separate database or cluster (as application-cloud.yml does) before running.
+# ---------------------------------------------------------------------------
 spring:
   datasource:
     url: jdbc:yugabytedb://127.0.0.2:5433/acdc
@@ -6,10 +13,13 @@ spring:
     password: yugabyte
     driver-class-name: com.yugabyte.Driver
 
-# producer
+# ---------------------------------------------------------------------------
+# source (capture side)
+# ---------------------------------------------------------------------------
 producer:
   name: cdc-source
   connector-class: io.debezium.connector.postgresql.YugabyteDBConnector
+  offset-storage: io.debezium.storage.jdbc.offset.JdbcOffsetBackingStore
   offset-storage-jdbc-url: jdbc:postgresql://127.0.0.2:5433/acdc
   offset-storage-jdbc-user: yugabyte
   offset-storage-jdbc-password: yugabyte
@@ -24,39 +34,79 @@ producer:
   db-name: acdc
   plugin-name: yboutput
   replication-slot: ybdb
+  # Adding a table here requires a restart, and an incremental snapshot if it
+  # already holds data. See signal-data-collection below.
   table-list: public.products,public.orders,public.users,public.reviews
   schema-list: public
   server-id: ybdb
   server-name: ybdb
   publication-mode: filtered
   publication-name: ybdb
-  task-max: 4
+  task-max: 1
   topic-prefix: ybdb
   timestamp-precision-mode: adaptive_time_microseconds
   log-errors-include-messages: true
+  # Required by consumer.enable-transaction-boundary: supplies the BEGIN/END
+  # markers that delimit a source transaction.
+  provide-transaction-metadata: true
+  # Keeps the slot's confirmed LSN advancing while the captured tables are idle.
+  heartbeat-interval-ms: 10000
+  # Create this table to enable incremental snapshots (needed to backfill a
+  # table added to table-list later):
+  #   CREATE TABLE public.cdc_signal (id varchar(64) PRIMARY KEY,
+  #     type varchar(32) NOT NULL, data varchar(2048) NULL);
+  # signal-data-collection: public.cdc_signal
   poll-interval-ms: 100
   max-batch-size: 5000
   max-queue-size: 10000
-  executor-threads: 1
-  enable-async: false
   replica-identity: public.*:FULL
   snapshot-mode: initial
+
+# ---------------------------------------------------------------------------
+# apply behaviour
+# ---------------------------------------------------------------------------
 consumer:
-  queue-capacity: 100
+  # true  -> buffer each source transaction and commit it atomically; the sink
+  #          never exposes a partial source transaction
+  # false -> commit ordered batches of batch-size rows; order is preserved but a
+  #          source transaction may span several sink commits
+  enable-transaction-boundary: true
+  # Group N adjacent source transactions into one sink commit. Raising this
+  # trades commit granularity for throughput and never exposes a partial
+  # transaction -- it is the throughput lever to reach for, not concurrency.
+  transactions-per-commit: 1
   batch-size: 500
-  enable-batch: true
+  max-buffered-rows: 50000
   flush-interval-ms: 2000
-  drain-interval-ms: 120000
+  drain-interval-ms: 30000
+  # basic -> propagate ADD COLUMN and lossless type widening to the sink
+  # none  -> never issue DDL
+  schema-evolution: basic
+  auto-create-tables: true
+  allow-column-drop: false
+  # Created in the sink at startup. Stays empty until the first transaction
+  # commits -- the watermark write is inside the row transaction, so a failing
+  # apply rolls it back too.
+  apply-state-table: cdc_apply_state
+  apply-state-schema: public
+  # Records the commit LSN the sink has reached. Skipping on it is off because a
+  # YugabyteDB slot's LSNs restart low when the slot is recreated, which would
+  # make every new transaction look already-applied. Every statement is
+  # idempotent, so replay is safe without it.
+  skip-applied-lsn: false
+  # Replication origin names to discard, matched against source.origin on each
+  # event. This is loop prevention -- see README. Only matches if the writer tags
+  # its transactions with pg_replication_origin_session_setup(); a plain JDBC
+  # write carries no origin at all.
+  ignore-origins: []
+  #  - cdc_apply
+  # The write half: tags this pipeline's own transactions so the filter above can
+  # recognise them. Needs maximum-pool-size=1 (an origin can only be active in
+  # one session at a time) and is verified at startup. Leave blank to disable.
+  # apply-origin-name: cdc_apply
 
 retry:
   max-attempts: 5
   multiplier: 3
   initial-interval-in-ms: 500
   max-interval-in-ms: 30000
-
-
-
-
-
-
-

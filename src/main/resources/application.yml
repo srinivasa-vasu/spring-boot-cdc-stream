@@ -2,18 +2,22 @@ spring:
   application:
     name: ChangeEvent
 
-  jpa:
-    properties:
-      hibernate:
-        generate_statistics: false
-        jdbc:
-          batch_size: 5000
-#        order_inserts: true
-#        order_updates: true
-#        order_deletes: true
   datasource:
     hikari:
-      minimum-idle: 10
-      maximum-pool-size: 10
+      minimum-idle: 1
+      # One connection, deliberately. The apply path is single-threaded, so a
+      # larger pool buys nothing -- and consumer.apply-origin-name *requires*
+      # exactly one, because a replication origin can be held by only one
+      # session and the tagged session must be the one the transaction runs on.
+      # Debezium's offset store opens its own connection, not from this pool.
+      maximum-pool-size: 1
       data-source-properties:
+        # Collapses each batch into one multi-row INSERT. The driver applies this
+        # to our ON CONFLICT upserts too, not just plain inserts -- verified by
+        # BatchRewriteCompatibilityTests.
+        #
+        # Safe ONLY because ChangeEventApplier.applyRuns cuts a batch when a key
+        # repeats: one rewritten command cannot affect the same row twice, and
+        # PostgreSQL raises 21000 rather than applying the changes in order. Do
+        # not remove that run split while this is enabled.
         reWriteBatchedInserts: true
