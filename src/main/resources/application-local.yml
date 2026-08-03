@@ -1,3 +1,4 @@
+# consumer
 spring:
   datasource:
     url: jdbc:yugabytedb://127.0.0.2:5433/acdc
@@ -5,10 +6,11 @@ spring:
     password: yugabyte
     driver-class-name: com.yugabyte.Driver
 
+# producer
 producer:
   name: cdc-source
   connector-class: io.debezium.connector.postgresql.YugabyteDBConnector
-  offset-storage-jdbc-url: jdbc:postgresql://127.0.0.2:5433:5433/acdc
+  offset-storage-jdbc-url: jdbc:postgresql://127.0.0.2:5433/acdc
   offset-storage-jdbc-user: yugabyte
   offset-storage-jdbc-password: yugabyte
   offset-storage-jdbc-driver: org.postgresql.Driver

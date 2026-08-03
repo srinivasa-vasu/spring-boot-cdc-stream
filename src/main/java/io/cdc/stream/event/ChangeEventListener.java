@@ -43,7 +43,7 @@ public class ChangeEventListener {
 
 	@Retryable(retryFor = { Throwable.class }, recover = "recoverEventListenerFailure",
 			maxAttemptsExpression = "#{retryConfig.maxAttempts:3})",
-			backoff = @Backoff(delayExpression = "#{retryConfig.maxAttempts:1000})",
+			backoff = @Backoff(delayExpression = "#{retryConfig.initialIntervalInMs:100})",
 					multiplierExpression = "#{retryConfig.multiplier:3})",
 					maxDelayExpression = "#{retryConfig.maxIntervalInMs:20000})"))
 	public void failSafeRun() {
