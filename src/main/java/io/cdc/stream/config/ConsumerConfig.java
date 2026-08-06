@@ -70,11 +70,28 @@ public class ConsumerConfig {
 	/**
 	 * {@code none} to never issue DDL against the sink, {@code basic} to propagate
 	 * additive and safely widening source schema changes.
+	 *
+	 * <p>
+	 * Off by default, and it is the master switch: nothing below it issues DDL while this
+	 * is {@code none}, {@link #autoCreateTables} included. Writing rows is what this
+	 * pipeline is for, but altering someone else's tables is a different kind of act — the
+	 * sink may be owned by another team, under migration control, or shared with readers
+	 * that a new column breaks. Inferring DDL from a fingerprint diff is also the least
+	 * certain thing here: logical decoding carries no DDL, so a rename is indistinguishable
+	 * from a drop plus an add and there is no backfill for a new column. Turning this on is
+	 * a deliberate statement that the sink is this pipeline's to reshape.
+	 *
+	 * <p>
+	 * With {@code none} the sink is still checked, read-only, before any rows are applied:
+	 * a missing table or a missing {@code ON CONFLICT} target fails immediately with the
+	 * cause named, rather than surfacing mid-apply as an opaque SQLSTATE.
 	 */
-	private SchemaEvolution schemaEvolution = SchemaEvolution.basic;
+	private SchemaEvolution schemaEvolution = SchemaEvolution.none;
 
 	/**
-	 * Create the sink table from the record schema when it does not exist.
+	 * Create the sink table from the record schema when it does not exist. Subordinate to
+	 * {@link #schemaEvolution}: creating a table is a schema change, so this does nothing
+	 * unless evolution is enabled.
 	 */
 	private boolean autoCreateTables = true;
 
@@ -96,6 +113,26 @@ public class ConsumerConfig {
 	 * {@code search_path}, so the table always lands somewhere predictable.
 	 */
 	private String applyStateSchema = "public";
+
+	/**
+	 * Record every DDL statement this pipeline issues against the sink in
+	 * {@code schemaAuditTable}.
+	 *
+	 * <p>
+	 * Purely an audit: nothing reads it back, and turning it off changes no behaviour.
+	 * It is on by default because the information is otherwise unrecoverable. Logical
+	 * decoding carries no DDL, so a sink column is the result of a fingerprint diff
+	 * computed once by a process that has since restarted — after the fact, neither the
+	 * source nor the sink can say what the change was or when it happened, and the only
+	 * other trace is a log line.
+	 */
+	private boolean schemaAudit = true;
+
+	/**
+	 * Table holding that trail, created in {@code applyStateSchema} alongside the
+	 * watermark table.
+	 */
+	private String schemaAuditTable = "cdc_schema_audit";
 
 	/**
 	 * Discard transactions whose commit LSN is at or below the stored watermark.

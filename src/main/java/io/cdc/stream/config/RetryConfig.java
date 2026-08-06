@@ -7,17 +7,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@ConfigurationProperties(prefix = "retry")
+@ConfigurationProperties(prefix = "spring.retry")
 @Getter
 @Setter
 public class RetryConfig {
 
-	private int maxAttempts = 3;
-
-	private int initialIntervalInMs = 200;
-
-	private double multiplier = 2;
-
-	private int maxIntervalInMs = 10000;
+	private int maxInterval;
+	private int initialInterval;
+	private int multiplier;
+	private int maxAttempts;
+	private int jitter;
 
 }

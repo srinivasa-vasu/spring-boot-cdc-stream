@@ -1,6 +1,12 @@
 spring:
   application:
-    name: ChangeEvent
+    name: ApplyChangeEvent
+  retry:
+    initial-interval: 200
+    max-interval: 5000
+    multiplier: 3
+    max-attempts: 3
+    jitter: 100
 
   datasource:
     hikari:

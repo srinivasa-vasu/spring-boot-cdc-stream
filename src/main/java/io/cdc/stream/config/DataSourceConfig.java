@@ -12,8 +12,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -53,9 +53,9 @@ import org.springframework.transaction.PlatformTransactionManager;
  * pool is used.
  */
 @Configuration
-public class ApplyDataSourceConfig {
+public class DataSourceConfig {
 
-	private final static Logger log = LoggerFactory.getLogger(ApplyDataSourceConfig.class);
+	private final static Logger log = LoggerFactory.getLogger(DataSourceConfig.class);
 
 	/**
 	 * Origin names are interpolated into the init SQL, which cannot be parameterised, so

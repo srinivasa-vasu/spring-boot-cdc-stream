@@ -36,7 +36,7 @@ public class ChangeEventListener {
 	private final static Logger log = LoggerFactory.getLogger(ChangeEventListener.class);
 
 	private final ExecutorService executor = Executors
-			.newSingleThreadExecutor(runnable -> new Thread(runnable, "cdc-engine"));
+		.newSingleThreadExecutor(runnable -> new Thread(runnable, "cdc-engine"));
 
 	private final Configuration connectorConfig;
 
@@ -65,14 +65,14 @@ public class ChangeEventListener {
 
 	private void runWithRetries() {
 		int maxAttempts = Math.max(1, retryConfig.getMaxAttempts());
-		long delay = retryConfig.getInitialIntervalInMs();
+		long delay = retryConfig.getInitialInterval();
 		for (int attempt = 1; attempt <= maxAttempts && !shuttingDown; attempt++) {
 			try {
 				log.info("Starting change event listener (attempt {}/{})", attempt, maxAttempts);
 				engine = DebeziumEngine.create(ChangeEventFormat.of(Connect.class))
-						.using(connectorConfig.asProperties())
-						.notifying(dispatcher::handleBatch)
-						.build();
+					.using(connectorConfig.asProperties())
+					.notifying(dispatcher::handleBatch)
+					.build();
 				engine.run();
 				if (shuttingDown) {
 					return;
@@ -94,7 +94,7 @@ public class ChangeEventListener {
 			if (attempt < maxAttempts && !sleep(delay)) {
 				return;
 			}
-			delay = Math.min((long) (delay * retryConfig.getMultiplier()), retryConfig.getMaxIntervalInMs());
+			delay = Math.min((long) (delay * retryConfig.getMultiplier()), retryConfig.getMaxInterval());
 		}
 		if (!shuttingDown) {
 			log.error("Change event listener gave up after {} attempt(s). No changes are being replicated.",

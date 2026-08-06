@@ -34,6 +34,11 @@ import org.springframework.stereotype.Component;
  * incompatible type change halts the pipeline: there is no safe automatic answer, and
  * halting loudly beats truncating silently. Column drops are not propagated by default
  * because they cannot be undone.
+ *
+ * <p>
+ * All of that is off unless {@code consumer.schema-evolution} is set to {@code basic}. With
+ * the default {@code none} this class issues no DDL at all and only verifies, read-only,
+ * that the sink can accept the rows — see {@link #verifyUsable}.
  */
 @Component
 public class SchemaEvolver {
@@ -44,6 +49,8 @@ public class SchemaEvolver {
 
 	private final ConsumerConfig config;
 
+	private final SchemaAuditLog auditLog;
+
 	/** Fingerprint of the last schema reconciled per table, to skip the common case. */
 	private final Map<TableId, String> reconciled = new ConcurrentHashMap<>();
 
@@ -52,9 +59,11 @@ public class SchemaEvolver {
 	 * part of the row transaction, and metadata reads are chatty enough that queueing
 	 * them behind the single tagged apply connection would stall applies for no benefit.
 	 */
-	public SchemaEvolver(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate, ConsumerConfig config) {
+	public SchemaEvolver(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate, ConsumerConfig config,
+			SchemaAuditLog auditLog) {
 		this.jdbcTemplate = jdbcTemplate;
 		this.config = config;
+		this.auditLog = auditLog;
 	}
 
 	/**
@@ -70,12 +79,11 @@ public class SchemaEvolver {
 		if (schema == null || schema.fingerprint().equals(reconciled.get(schema.table()))) {
 			return;
 		}
-		if (config.getSchemaEvolution() == ConsumerConfig.SchemaEvolution.none) {
-			reconciled.put(schema.table(), schema.fingerprint());
-			return;
-		}
 		Map<String, String> sink = sinkColumns(schema.table());
-		if (sink.isEmpty()) {
+		if (config.getSchemaEvolution() == ConsumerConfig.SchemaEvolution.none) {
+			verifyUsable(schema, sink);
+		}
+		else if (sink.isEmpty()) {
 			createTable(schema);
 		}
 		else {
@@ -83,6 +91,40 @@ public class SchemaEvolver {
 			verifyConflictTarget(schema);
 		}
 		reconciled.put(schema.table(), schema.fingerprint());
+	}
+
+	/**
+	 * The read-only half of reconciliation, used when DDL is switched off. Issues nothing,
+	 * but refuses to start applying against a sink that cannot accept the rows.
+	 *
+	 * <p>
+	 * Worth doing precisely because {@code none} is the default. Left unchecked, a missing
+	 * table surfaces as {@code 42P01} and a missing unique constraint as {@code 42P10} —
+	 * both from deep inside the first batch, both folded by Spring into
+	 * {@code BadSqlGrammarException}, and the second against SQL that is in fact well
+	 * formed. Failing here instead names the table and says what to do about it.
+	 */
+	private void verifyUsable(TableSchema schema, Map<String, String> sink) {
+		if (sink.isEmpty()) {
+			throw new UnrecoverableApplyException(String.format(
+					"Sink table %s does not exist and consumer.schema-evolution is 'none', so this pipeline will not "
+							+ "create it. Create it manually, or set consumer.schema-evolution=basic (with "
+							+ "consumer.auto-create-tables=true) to have it created from the change event schema.",
+					schema.table()));
+		}
+		List<String> missing = schema.columns()
+			.keySet()
+			.stream()
+			.filter(column -> !sink.containsKey(column))
+			.toList();
+		if (!missing.isEmpty()) {
+			throw new UnrecoverableApplyException(String.format(
+					"Sink table %s is missing column(s) %s that the change events carry, and "
+							+ "consumer.schema-evolution is 'none' so they will not be added. Add them manually, or set "
+							+ "consumer.schema-evolution=basic to propagate additive source changes.",
+					schema.table(), missing));
+		}
+		verifyConflictTarget(schema);
 	}
 
 	/**
@@ -157,6 +199,7 @@ public class SchemaEvolver {
 				+ ')';
 		log.info("Creating sink table {}: {}", schema.table(), ddl);
 		jdbcTemplate.execute(ddl);
+		auditLog.record(schema, SchemaAuditLog.Change.CREATE, ddl);
 	}
 
 	private void alterTable(TableSchema schema, Map<String, String> sink) {
@@ -212,6 +255,7 @@ public class SchemaEvolver {
 		statements.forEach(ddl -> {
 			log.info("  {}", ddl);
 			jdbcTemplate.execute(ddl);
+			auditLog.record(schema, SchemaAuditLog.Change.ALTER, ddl);
 		});
 	}
 

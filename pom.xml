@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>3.4.5</version>
+		<version>4.0.6</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>io.cdc</groupId>
@@ -29,6 +29,17 @@
 	<properties>
 		<java.version>21</java.version>
 		<debz.version>2.5.2.Final</debz.version>
+		<!--
+			Pinned to the version Debezium 2.5.2 declares (version.kafka in
+			debezium-build-parent). Spring Boot 4 manages Kafka to 4.1.x, and
+			connect-json 4.1's JsonConverter calls JsonNode.properties(), added in
+			Jackson 2.15. The debezium-yugabyte uber-jar bundles an unrelocated
+			jackson-databind 2.13.5 that wins classpath order over the 2.21 Maven
+			resolves, so that call dies with NoSuchMethodError. Staying on 3.6.1
+			avoids the call and keeps Debezium on the Kafka it was built against.
+			Revisit when moving to a Debezium build aligned with Kafka 4.x.
+		-->
+		<kafka.version>3.6.1</kafka.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -69,10 +80,10 @@
 			<artifactId>jackson-datatype-jsr310</artifactId>
 		</dependency>
 
-		<dependency>
-			<groupId>org.springframework.retry</groupId>
-			<artifactId>spring-retry</artifactId>
-		</dependency>
+<!--		<dependency>-->
+<!--			<groupId>org.springframework.retry</groupId>-->
+<!--			<artifactId>spring-retry</artifactId>-->
+<!--		</dependency>-->
 
 <!--		<dependency>-->
 <!--			<groupId>com.yugabyte.cdc</groupId>-->

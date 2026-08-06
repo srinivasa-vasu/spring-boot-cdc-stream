@@ -116,7 +116,16 @@ all columns of the table regardless of which ones the row changed. A change in t
 fingerprint is therefore a reliable signal that the source was altered, and diffing it
 against the sink's real columns yields the DDL to apply.
 
-With `consumer.schema-evolution: basic`:
+DDL is **off by default** (`consumer.schema-evolution: none`), because altering the sink is a
+different kind of act from writing rows to it — the sink may be owned by another team, under
+migration control, or read by something a new column breaks — and because a fingerprint diff
+is the least certain inference in this pipeline (see the two limits below). `none` still
+verifies the sink read-only before the first batch of each table, so a missing table or a
+missing `ON CONFLICT` target fails immediately with the cause named, rather than surfacing
+mid-apply as `42P01` or `42P10` wrapped in `BadSqlGrammarException`.
+
+Opting in with `consumer.schema-evolution: basic`, which is also the master switch for
+`auto-create-tables` and `allow-column-drop`:
 
 | Source change | Sink |
 |---|---|
@@ -128,6 +137,31 @@ With `consumer.schema-evolution: basic`:
 
 Halting on an unsafe change is deliberate: there is no automatic answer that is safe, and
 stopping visibly beats truncating silently.
+
+Two limits follow from having no DDL stream, and neither can be worked around from here.
+A **rename** is indistinguishable from a drop plus an add, so the sink ends up with both
+columns — the old one frozen at its last value, the new one NULL for every existing row.
+And `ADD COLUMN` has **no backfill**: the column's source default is not propagated, so
+until each row is next updated the sink reads NULL where the source reads the default. An
+incremental snapshot is the only cure for either.
+
+Every `CREATE` and `ALTER` issued against the sink is recorded in
+`consumer.schema-audit-table`. Nothing reads it back — this is not Debezium's
+`schema.history.internal.*`, which exists for connectors reading a schema-less physical log
+and has no equivalent here. It is an audit trail, and it is on by default because the
+information is otherwise unrecoverable: the fingerprint diff that produced a column happened
+once, in a process that has since restarted, and neither the source nor the sink can
+reconstruct it afterwards.
+
+```sql
+SELECT applied_at, change_type, statement
+  FROM cdc_schema_audit
+ WHERE table_name = 'orders'
+ ORDER BY applied_at;
+```
+
+The entry is written after the DDL has run, and outside it — DDL auto-commits, so it can
+never join the row transaction. A crash in between loses the entry, not the DDL.
 
 ### Adding a table to the capture set
 

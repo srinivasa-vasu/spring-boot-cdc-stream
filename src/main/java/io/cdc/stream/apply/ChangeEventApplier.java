@@ -9,13 +9,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.springframework.core.retry.RetryTemplate;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.lang.NonNull;
-import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -82,6 +83,7 @@ public class ChangeEventApplier {
 	 * unavailable, as during the initial snapshot.
 	 * @return number of rows written
 	 */
+	@SneakyThrows
 	public int apply(List<ChangeRow> rows, Long commitLsn) {
 		long watermark = commitLsn != null ? commitLsn : highestRowLsn(rows);
 		if (watermark > 0) {
@@ -91,7 +93,7 @@ public class ChangeEventApplier {
 		if (pending.isEmpty()) {
 			return 0;
 		}
-		return retryTemplate.execute(context -> {
+		return retryTemplate.execute(() -> {
 			try {
 				return attempt(pending, watermark);
 			}
@@ -107,10 +109,7 @@ public class ChangeEventApplier {
 		// DDL auto-commits, so it must happen before the row transaction opens.
 		distinctSchemas(rows).values().forEach(schemaEvolver::reconcile);
 
-		String lastTxId = rows.get(rows.size() - 1).txId();
-		// No origin handling here: the pool claims the replication origin in its
-		// connection-init SQL, so every connection it hands out is already tagged. See
-		// ApplyDataSourceConfig.
+		String lastTxId = rows.getLast().txId();
 		transactionTemplate.executeWithoutResult(status -> {
 			applyRuns(rows);
 			if (watermark > 0) {
@@ -123,11 +122,11 @@ public class ChangeEventApplier {
 
 	private long highestRowLsn(List<ChangeRow> rows) {
 		return rows.stream()
-			.map(ChangeRow::lsn)
-			.filter(java.util.Objects::nonNull)
-			.mapToLong(Long::longValue)
-			.max()
-			.orElse(0L);
+				.map(ChangeRow::lsn)
+				.filter(java.util.Objects::nonNull)
+				.mapToLong(Long::longValue)
+				.max()
+				.orElse(0L);
 	}
 
 	/** Drops rows an earlier run already committed, using the watermark in the sink. */
@@ -258,7 +257,7 @@ public class ChangeEventApplier {
 	private void execute(SqlGenerator.Statement statement, List<ChangeRow> run) {
 		try {
 			if (run.size() == 1) {
-				ChangeRow row = run.get(0);
+				ChangeRow row = run.getFirst();
 				int affected = jdbcTemplate.update(statement.sql(), ps -> bind(ps, statement, row));
 				if (affected == 0 && row.op() == io.cdc.stream.event.OPERATION.u) {
 					log.warn("Update for {} key {} matched no sink row; the sink may be missing this row", row.table(),
@@ -283,8 +282,8 @@ public class ChangeEventApplier {
 			// BadSqlGrammarException,
 			// so the generated SQL alone rarely identifies the cause. Name the table, the
 			// operation and the keys involved.
-			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.get(0).op(),
-					run.get(0).table(), run.stream().map(this::keyOf).limit(20).toList(), statement.sql());
+			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.getFirst().op(),
+					run.getFirst().table(), run.stream().map(this::keyOf).limit(20).toList(), statement.sql());
 			throw e;
 		}
 	}

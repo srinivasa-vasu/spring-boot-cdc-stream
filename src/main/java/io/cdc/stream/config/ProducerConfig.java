@@ -32,11 +32,22 @@ public class ProducerConfig {
 
 	private String offsetStorageJdbcPassword;
 
-	private String offsetStorageJdbcDriver;
-
+	/**
+	 * Maps to {@code offset.storage.jdbc.offset.table.name}, not the shorter
+	 * {@code offset.storage.jdbc.table} that reads like the obvious name. Debezium
+	 * validates only that the required fields are present and drops anything it does not
+	 * declare, so the wrong key is accepted in silence and the store falls back to its
+	 * default table, {@code debezium_offset_storage}.
+	 *
+	 * <p>
+	 * Leave it unqualified. {@code JdbcOffsetBackingStore} checks for the table with
+	 * {@code DatabaseMetaData.getTables}, passing this value as a table <em>name
+	 * pattern</em>, so a schema-qualified value never matches an existing table — and the
+	 * create it then runs is a bare {@code CREATE TABLE} with no {@code IF NOT EXISTS},
+	 * which fails on the second startup. Put {@code currentSchema=} on
+	 * {@code offsetStorageJdbcUrl} instead.
+	 */
 	private String offsetStorageJdbcTable;
-
-	private String offsetStorageJdbcSchema;
 
 	private String offsetFlushIntervalMs;
 
@@ -125,9 +136,9 @@ public class ProducerConfig {
 		put(props, "offset.storage.jdbc.url", offsetStorageJdbcUrl);
 		put(props, "offset.storage.jdbc.user", offsetStorageJdbcUser);
 		put(props, "offset.storage.jdbc.password", offsetStorageJdbcPassword);
-		put(props, "offset.storage.jdbc.driver", offsetStorageJdbcDriver);
-		put(props, "offset.storage.jdbc.table", offsetStorageJdbcTable);
-		put(props, "offset.storage.jdbc.schema", offsetStorageJdbcSchema);
+		// No driver property exists: the store connects with DriverManager.getConnection,
+		// which resolves the driver from the URL. No schema property exists either.
+		put(props, "offset.storage.jdbc.offset.table.name", offsetStorageJdbcTable);
 		put(props, "offset.flush.interval.ms", offsetFlushIntervalMs);
 		put(props, "database.hostname", hostname);
 		put(props, "database.port", port);
