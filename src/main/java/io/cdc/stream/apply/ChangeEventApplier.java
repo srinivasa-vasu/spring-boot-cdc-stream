@@ -52,20 +52,20 @@ public class ChangeEventApplier {
 
 	private final SqlGenerator sqlGenerator;
 
-	private final SchemaEvolver schemaEvolver;
+	private final SinkPrecondition sinkPrecondition;
 
 	private final ApplyStateStore stateStore;
 
 	private final ConsumerConfig config;
 
 	public ChangeEventApplier(JdbcTemplate jdbcTemplate, PlatformTransactionManager transactionManager,
-			RetryTemplate retryTemplate, SqlGenerator sqlGenerator, SchemaEvolver schemaEvolver,
+			RetryTemplate retryTemplate, SqlGenerator sqlGenerator, SinkPrecondition sinkPrecondition,
 			ApplyStateStore stateStore, ConsumerConfig config) {
 		this.jdbcTemplate = jdbcTemplate;
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.retryTemplate = retryTemplate;
 		this.sqlGenerator = sqlGenerator;
-		this.schemaEvolver = schemaEvolver;
+		this.sinkPrecondition = sinkPrecondition;
 		this.stateStore = stateStore;
 		this.config = config;
 	}
@@ -99,15 +99,16 @@ public class ChangeEventApplier {
 			}
 			catch (RuntimeException e) {
 				// Force a re-read of the sink's real columns on the next attempt.
-				pending.forEach(row -> schemaEvolver.invalidate(row.table()));
+				pending.forEach(row -> sinkPrecondition.invalidate(row.table()));
 				throw e;
 			}
 		});
 	}
 
 	private int attempt(List<ChangeRow> rows, long watermark) {
-		// DDL auto-commits, so it must happen before the row transaction opens.
-		distinctSchemas(rows).values().forEach(schemaEvolver::reconcile);
+		// Read-only, and outside the row transaction: a sink that cannot accept these rows
+		// should fail before any of them is written.
+		distinctSchemas(rows).values().forEach(sinkPrecondition::verify);
 
 		String lastTxId = rows.getLast().txId();
 		transactionTemplate.executeWithoutResult(status -> {
@@ -199,8 +200,7 @@ public class ChangeEventApplier {
 					break;
 				}
 				if (!keysInRun.add(keyTuple(candidate))) {
-					// Same key twice: end the batch here so each change is its own
-					// command.
+					// Same key twice: end the batch here so each change is its own command.
 					break;
 				}
 				run.add(candidate);
@@ -278,10 +278,6 @@ public class ChangeEventApplier {
 			});
 		}
 		catch (RuntimeException e) {
-			// Spring folds several PostgreSQL SQLSTATE classes into
-			// BadSqlGrammarException,
-			// so the generated SQL alone rarely identifies the cause. Name the table, the
-			// operation and the keys involved.
 			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.getFirst().op(),
 					run.getFirst().table(), run.stream().map(this::keyOf).limit(20).toList(), statement.sql());
 			throw e;

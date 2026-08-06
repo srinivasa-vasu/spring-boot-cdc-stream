@@ -28,7 +28,7 @@ cd spring-boot-cdc-stream
 
 ```sh
 # download the ybdb connector jar
-wget https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2024.2.3/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar
+wget https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2025.2.3/yugabytedb-source-connector-dz.2.5.2.yb.2025.2.3-jar-with-dependencies.jar
 
 # create ybdb pom
 cat > debezium-yugabyte-2.5.2.Final.pom << EOF
@@ -47,7 +47,7 @@ EOF
 
 # install connector to the local repo
 mvn install:install-file \
-  -Dfile=debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar \
+  -Dfile=yugabytedb-source-connector-dz.2.5.2.yb.2025.2.3-jar-with-dependencies.jar \
   -DpomFile=debezium-yugabyte-2.5.2.Final.pom \
   -DgroupId=io.debezium \
   -DartifactId=debezium-yugabyte \
@@ -108,76 +108,71 @@ written to `consumer.apply-state-table` **inside the same transaction as the row
 replay after a crash is recognised and skipped — Debezium's own offset store is flushed
 asynchronously and always lags the apply.
 
-### Schema changes (DDL)
+### Schema changes are not replicated
 
-PostgreSQL and YugabyteDB logical decoding emit no DDL events, so there is no DDL stream to
-subscribe to. Instead, every change event carries its Connect schema, and that schema lists
-all columns of the table regardless of which ones the row changed. A change in the derived
-fingerprint is therefore a reliable signal that the source was altered, and diffing it
-against the sink's real columns yields the DDL to apply.
+This pipeline replicates **data**. It issues no DDL against the sink, ever, and the sink's
+schema is expected to be managed out of band — by your migration tool, or by whoever owns the
+target. Source and sink must be migrated in a compatible order: add the column to the sink
+before the source starts sending it.
 
-DDL is **off by default** (`consumer.schema-evolution: none`), because altering the sink is a
-different kind of act from writing rows to it — the sink may be owned by another team, under
-migration control, or read by something a new column breaks — and because a fingerprint diff
-is the least certain inference in this pipeline (see the two limits below). `none` still
-verifies the sink read-only before the first batch of each table, so a missing table or a
-missing `ON CONFLICT` target fails immediately with the cause named, rather than surfacing
-mid-apply as `42P01` or `42P10` wrapped in `BadSqlGrammarException`.
+That is a deliberate boundary rather than a missing feature. PostgreSQL and YugabyteDB
+logical decoding emit no DDL events, so the only way to infer a schema change here is to diff
+each change event's Connect schema against the sink — an inference that cannot tell a rename
+from a drop plus an add, cannot backfill a new column with the source's default, and would be
+reshaping tables this pipeline does not own.
 
-Opting in with `consumer.schema-evolution: basic`, which is also the master switch for
-`auto-create-tables` and `allow-column-drop`:
+What it does do, once per table per distinct schema shape, is verify read-only that the sink
+can accept the rows, before any are written:
 
-| Source change | Sink |
+| Checked | Why it is worth failing early |
 |---|---|
-| `ADD COLUMN` | `ADD COLUMN` (nullable — existing sink rows have no value for it) |
-| Lossless type widening (`int4`→`int8`, `varchar`→`text`, …) | `ALTER COLUMN ... TYPE` |
-| Narrowing or incompatible type change | **pipeline halts** with the column named |
-| `DROP COLUMN` | column kept, `NOT NULL` dropped (set `allow-column-drop` to propagate) |
-| New table already in `table-list` | `CREATE TABLE` from the record schema, PK from the record key |
+| Table exists | otherwise `42P01`, from deep inside the first batch |
+| Every event column exists in the sink | otherwise a column silently absent from the write |
+| Sink column can store the incoming values | otherwise truncation or out-of-range, thousands of rows in |
+| A unique constraint matches the key columns | otherwise `42P10` — reported as a syntax-class error against SQL that is well formed |
 
-Halting on an unsafe change is deliberate: there is no automatic answer that is safe, and
-stopping visibly beats truncating silently.
+Spring folds the SQLSTATE cases into `BadSqlGrammarException`, so the generated SQL rarely
+identifies the cause on its own. Failing up front names the table, the columns, and what to
+do. A sink column that is deliberately *wider* than the source is fine and is not reported.
 
-Two limits follow from having no DDL stream, and neither can be worked around from here.
-A **rename** is indistinguishable from a drop plus an add, so the sink ends up with both
-columns — the old one frozen at its last value, the new one NULL for every existing row.
-And `ADD COLUMN` has **no backfill**: the column's source default is not propagated, so
-until each row is next updated the sink reads NULL where the source reads the default. An
-incremental snapshot is the only cure for either.
-
-Every `CREATE` and `ALTER` issued against the sink is recorded in
-`consumer.schema-audit-table`. Nothing reads it back — this is not Debezium's
-`schema.history.internal.*`, which exists for connectors reading a schema-less physical log
-and has no equivalent here. It is an audit trail, and it is on by default because the
-information is otherwise unrecoverable: the fingerprint diff that produced a column happened
-once, in a process that has since restarted, and neither the source nor the sink can
-reconstruct it afterwards.
-
-```sql
-SELECT applied_at, change_type, statement
-  FROM cdc_schema_audit
- WHERE table_name = 'orders'
- ORDER BY applied_at;
-```
-
-The entry is written after the DDL has run, and outside it — DDL auto-commits, so it can
-never join the row transaction. A crash in between loses the entry, not the DDL.
+The check is not retryable — no amount of waiting adds a missing column — so it halts the
+pipeline with `UnrecoverableApplyException` rather than burning through the backoff.
 
 ### Adding a table to the capture set
 
-Adding a table is not fully automatic, and the reasons are on the source side:
+Only **streaming** works for a table added later. An existing slot will start delivering
+changes to the new table, but it will never backfill the rows already in it, and neither
+mechanism Debezium normally offers for that works against YugabyteDB logical replication:
+
+- **`snapshot-mode: initial` does not help.** The snapshot is taken once, when the
+  replication slot is created, and establishes that slot's consistent point. A table added to
+  `table.include.list` afterwards is past that point, and offsets already exist, so nothing
+  re-snapshots.
+- **`signal.data.collection` does not work.** Incremental snapshots driven by a signalling
+  table are not supported here, so `producer.signal-data-collection` will not backfill the
+  table however it is configured.
+
+To pick up a table that has no pre-existing rows:
 
 1. Add it to `producer.table-list` and **restart** — Debezium reconciles the publication at
-   connector startup only.
-2. `snapshot-mode: initial` does not re-snapshot once offsets exist, so a table that already
-   holds rows needs an incremental snapshot. Create the signalling table and set
-   `producer.signal-data-collection` (commented example in `application-local.yml`).
-3. Check the replica identity. `replica.identity.autoset.values` is applied at startup, and
-   in YugabyteDB the replica identity is captured when the replication slot is created — a
-   table created afterwards picks up the server default instead, and an existing slot may
-   need to be recreated to get `FULL`. Verify this against your YugabyteDB version.
+   connector startup only. 
+2. Create the table in the **sink** first, with a primary key or unique constraint on the same
+   key columns. This pipeline issues no DDL, so `SinkPrecondition` halts on the table's first
+   event otherwise.
 
-The sink side needs no code change: the table is created from the record schema on first
-event.
+To backfill a table that already holds rows, run a **separate replication slot** — creating a
+slot is what establishes a new consistent snapshot point, so a second deployment gets one:
 
+1. Add the table to the main pipeline's `table-list` and restart it, so streaming for that
+   table begins. Do this **first**.
+2. Then start a second deployment with its own `replication-slot`, `publication-name` and
+   `offset-storage-jdbc-table`, a `table-list` containing only the new table, and
+   `snapshot-mode: initial`. Its slot creation snapshots the existing rows, after which it
+   streams.
+3. Once it has caught up, retire it. The main pipeline carries the table from then on.
 
+The order matters. Starting the backfill slot first leaves a window between its snapshot point
+and the main pipeline picking up the table, and changes in that window are lost. The order
+above overlaps the two instead — and overlap is harmless, because every statement this
+pipeline generates is idempotent (upsert by key, delete by key), so the same row applied twice
+converges on the same state.

@@ -85,9 +85,10 @@ public class ChangeEventDispatcher {
 							+ "Without the BEGIN/END markers there is no reliable way to know where a source "
 							+ "transaction ends, since a transaction can span several engine batches.");
 		}
-		log.info("Apply mode: {} (transactions per commit: {}, batch size: {}, schema evolution: {})",
+		log.info("Apply mode: {} (transactions per commit: {}, batch size: {}). Data only — no DDL is issued against "
+				+ "the sink; its schema must be migrated out of band.",
 				config.isEnableTransactionBoundary() ? "atomic per source transaction" : "ordered batches",
-				config.getTransactionsPerCommit(), config.getBatchSize(), config.getSchemaEvolution());
+				config.getTransactionsPerCommit(), config.getBatchSize());
 		if (config.isIgnoreReplicatedChanges()) {
 			log.info("Loop prevention: discarding every change that carries a replication origin");
 		}

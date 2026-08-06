@@ -110,9 +110,15 @@ public class ProducerConfig {
 	private int heartbeatIntervalMs = 10000;
 
 	/**
-	 * Signalling table, which is what makes incremental snapshots possible — the only way
-	 * to backfill a table that is added to the capture set later without re-snapshotting
-	 * everything.
+	 * Signalling table for Debezium's incremental snapshots.
+	 *
+	 * <p>
+	 * Does not work against YugabyteDB logical replication: incremental snapshots are not
+	 * supported, so setting this will not backfill a table added to the capture set later,
+	 * however the signalling table is configured. Backfilling needs a separate replication
+	 * slot, because slot creation is what establishes a consistent snapshot point — see
+	 * "Adding a table to the capture set" in the README. Left here for a plain PostgreSQL
+	 * source, where it does work.
 	 */
 	private String signalDataCollection;
 
@@ -136,8 +142,6 @@ public class ProducerConfig {
 		put(props, "offset.storage.jdbc.url", offsetStorageJdbcUrl);
 		put(props, "offset.storage.jdbc.user", offsetStorageJdbcUser);
 		put(props, "offset.storage.jdbc.password", offsetStorageJdbcPassword);
-		// No driver property exists: the store connects with DriverManager.getConnection,
-		// which resolves the driver from the URL. No schema property exists either.
 		put(props, "offset.storage.jdbc.offset.table.name", offsetStorageJdbcTable);
 		put(props, "offset.flush.interval.ms", offsetFlushIntervalMs);
 		put(props, "database.hostname", hostname);

@@ -34,9 +34,7 @@ import org.springframework.transaction.PlatformTransactionManager;
  *
  * <p>
  * <b>The metadata pool</b> is an ordinary pool with no origin. Schema reconciliation
- * reads {@code DatabaseMetaData} and issues DDL, neither of which belongs in the apply
- * transaction (DDL auto-commits anyway) and neither of which needs tagging, since logical
- * replication does not capture DDL. Keeping it off the single apply connection stops
+ * reads {@code DatabaseMetaData}. Keeping it off the single apply connection stops
  * metadata chatter serialising behind row applies.
  *
  * <p>

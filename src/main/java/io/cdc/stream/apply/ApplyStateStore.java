@@ -56,9 +56,6 @@ public class ApplyStateStore {
 		Long stored = jdbcTemplate.query("SELECT last_lsn FROM " + table.qualified() + " WHERE slot_name = ?",
 				rs -> rs.next() ? rs.getLong(1) : null, slot);
 		lastLsn = stored == null ? 0L : stored;
-		// Logged explicitly because the table is easy to go looking for in the wrong
-		// place:
-		// it lives in the sink, and stays empty until the first transaction commits.
 		log.info("Apply state table {} ready on {} (database '{}', current_schema '{}')", table.qualified(),
 				jdbcTemplate.queryForObject("SELECT inet_server_addr()::text || ':' || inet_server_port()",
 						String.class),
@@ -68,7 +65,6 @@ public class ApplyStateStore {
 				config.isSkipAppliedLsn() ? "enabled" : "disabled");
 	}
 
-	/** True when this LSN was already committed to the sink by an earlier run. */
 	/**
 	 * Whether this LSN was already committed by an earlier run.
 	 *
@@ -95,10 +91,6 @@ public class ApplyStateStore {
 			return;
 		}
 		sequenceChecked = true;
-		// A legitimate replay re-sends transactions at or below the watermark, but so
-		// does a
-		// recreated slot. They are indistinguishable from the LSN alone, so err towards
-		// applying: the statements are idempotent, and dropping data is not recoverable.
 		if (lsn <= lastLsn) {
 			slotReset = true;
 			log.warn("First commit LSN {} is at or below the stored watermark {} for slot '{}'. "

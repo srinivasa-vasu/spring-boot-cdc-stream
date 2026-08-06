@@ -1,6 +1,5 @@
 package io.cdc.stream.apply;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.kafka.connect.data.Schema;
@@ -57,19 +56,6 @@ public final class TableSchema {
 
 	public boolean hasKey() {
 		return !keyColumns.isEmpty();
-	}
-
-	/** Column definitions in source order, key columns first. */
-	public Map<String, Column> keyFirst() {
-		Map<String, Column> ordered = new LinkedHashMap<>();
-		keyColumns.forEach(name -> {
-			Column column = columns.get(name);
-			if (column != null) {
-				ordered.put(name, column);
-			}
-		});
-		columns.forEach(ordered::putIfAbsent);
-		return ordered;
 	}
 
 }

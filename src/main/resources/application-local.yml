@@ -1,6 +1,6 @@
 spring:
   datasource:
-    url: jdbc:yugabytedb://127.0.0.1:5433/acdc
+    url: jdbc:yugabytedb://[source2_ip]:5433/[db_name]
     username: yugabyte
     password: yugabyte
     driver-class-name: com.yugabyte.Driver
@@ -12,25 +12,22 @@ producer:
   name: cdc-source
   connector-class: io.debezium.connector.postgresql.YugabyteDBConnector
   offset-storage: io.debezium.storage.jdbc.offset.JdbcOffsetBackingStore
-  # currentSchema replaces the old offset-storage-jdbc-schema: the store has no
-  # schema property, so placement can only come from the connection.
-  offset-storage-jdbc-url: jdbc:postgresql://127.0.0.2:5433/acdc?currentSchema=public
+  offset-storage-jdbc-url: jdbc:postgresql://[source1_ip]:5433/[db_name]?currentSchema=public
   offset-storage-jdbc-user: yugabyte
   offset-storage-jdbc-password: yugabyte
-  # Maps to offset.storage.jdbc.offset.table.name. Must stay unqualified -- the
-  # store looks the table up as a name pattern and creates it without IF NOT
-  # EXISTS, so a schema-qualified value fails on the second startup.
   offset-storage-jdbc-table: cdc_offset
   offset-flush-interval-ms: 10000
-  hostname: 127.0.0.2
+  hostname: [source1_ip]
   port: 5433
   user: yugabyte
   password: yugabyte
-  db-name: acdc
+  db-name: [db_name]
   plugin-name: yboutput
   replication-slot: ybdb
-  # Adding a table here requires a restart, and an incremental snapshot if it
-  # already holds data. See signal-data-collection below.
+  # Adding a table here requires a restart, and gets streaming only -- this slot
+  # will never backfill rows the table already holds. Neither snapshot-mode nor
+  # signal-data-collection changes that; a backfill needs a separate slot. See
+  # "Adding a table to the capture set" in the README.
   table-list: public.products,public.orders,public.users,public.reviews
   schema-list: public
   server-id: ybdb
@@ -69,24 +66,11 @@ consumer:
   max-buffered-rows: 50000
   flush-interval-ms: 2000
   drain-interval-ms: 30000
-  # Master switch for DDL against the sink, off by default.
-  # none  -> never issue DDL. The sink is still checked read-only at startup of
-  #          each table's first batch, so a missing table or a missing ON CONFLICT
-  #          target fails immediately instead of mid-apply.
-  # basic -> propagate ADD COLUMN and lossless type widening. Opt in only when
-  #          this pipeline owns the sink schema: a rename is indistinguishable
-  #          from a drop plus an add, and a new column gets no backfill.
-  schema-evolution: none
-  # Both subordinate to schema-evolution -- neither does anything while it is none.
-  auto-create-tables: true
-  allow-column-drop: false
   # Created in the sink at startup. Stays empty until the first transaction
   # commits -- the watermark write is inside the row transaction, so a failing
   # apply rolls it back too.
   apply-state-table: cdc_apply_state
   apply-state-schema: public
-  schema-audit: true
-  schema-audit-table: cdc_schema_audit
   # Records the commit LSN the sink has reached. Skipping on it is off because a
   # YugabyteDB slot's LSNs restart low when the slot is recreated, which would
   # make every new transaction look already-applied. Every statement is
