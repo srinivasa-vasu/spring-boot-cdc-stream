@@ -83,9 +83,3 @@ consumer:
   ignore-origins: []
   apply-origin-name: atoc
   ignore-replicated-changes: true
-
-retry:
-  max-attempts: 5
-  multiplier: 3
-  initial-interval-in-ms: 500
-  max-interval-in-ms: 30000
