@@ -15,11 +15,8 @@ import org.slf4j.LoggerFactory;
 
 import org.springframework.core.retry.RetryTemplate;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The one place rows are written to the sink. Handles DML and DDL for every table, in
@@ -44,9 +41,7 @@ public class ChangeEventApplier {
 
 	private final static Logger log = LoggerFactory.getLogger(ChangeEventApplier.class);
 
-	private final JdbcTemplate jdbcTemplate;
-
-	private final TransactionTemplate transactionTemplate;
+	private final ApplyLanes lanes;
 
 	private final RetryTemplate retryTemplate;
 
@@ -56,17 +51,19 @@ public class ChangeEventApplier {
 
 	private final ApplyStateStore stateStore;
 
+	private final KafkaOffsetStore offsetStore;
+
 	private final ConsumerConfig config;
 
-	public ChangeEventApplier(JdbcTemplate jdbcTemplate, PlatformTransactionManager transactionManager,
-			RetryTemplate retryTemplate, SqlGenerator sqlGenerator, SinkPrecondition sinkPrecondition,
-			ApplyStateStore stateStore, ConsumerConfig config) {
-		this.jdbcTemplate = jdbcTemplate;
-		this.transactionTemplate = new TransactionTemplate(transactionManager);
+	public ChangeEventApplier(ApplyLanes lanes, RetryTemplate retryTemplate, SqlGenerator sqlGenerator,
+			SinkPrecondition sinkPrecondition, ApplyStateStore stateStore, KafkaOffsetStore offsetStore,
+			ConsumerConfig config) {
+		this.lanes = lanes;
 		this.retryTemplate = retryTemplate;
 		this.sqlGenerator = sqlGenerator;
 		this.sinkPrecondition = sinkPrecondition;
 		this.stateStore = stateStore;
+		this.offsetStore = offsetStore;
 		this.config = config;
 	}
 
@@ -81,10 +78,13 @@ public class ChangeEventApplier {
 	 * @param commitLsn commit LSN of the last transaction in this unit, taken from its
 	 * END marker. Falls back to the highest row LSN when transaction metadata is
 	 * unavailable, as during the initial snapshot.
+	 * @param positions Kafka coordinates covered by this unit, written inside the same
+	 * transaction so the sink — not Kafka's committed offset — is the authority on progress.
+	 * Empty for the embedded engine, which has no offsets of its own to record here.
 	 * @return number of rows written
 	 */
 	@SneakyThrows
-	public int apply(List<ChangeRow> rows, Long commitLsn) {
+	public int apply(List<ChangeRow> rows, Long commitLsn, List<PartitionPosition> positions) {
 		long watermark = commitLsn != null ? commitLsn : highestRowLsn(rows);
 		if (watermark > 0) {
 			stateStore.observeCommitLsn(watermark);
@@ -95,7 +95,7 @@ public class ChangeEventApplier {
 		}
 		return retryTemplate.execute(() -> {
 			try {
-				return attempt(pending, watermark);
+				return attempt(pending, watermark, positions);
 			}
 			catch (RuntimeException e) {
 				// Force a re-read of the sink's real columns on the next attempt.
@@ -105,19 +105,32 @@ public class ChangeEventApplier {
 		});
 	}
 
-	private int attempt(List<ChangeRow> rows, long watermark) {
+	private int attempt(List<ChangeRow> rows, long watermark, List<PartitionPosition> positions) {
 		// Read-only, and outside the row transaction: a sink that cannot accept these rows
 		// should fail before any of them is written.
 		distinctSchemas(rows).values().forEach(sinkPrecondition::verify);
 
+		// This thread's lane, and therefore this thread's connection. Everything below
+		// must go through it or it lands outside the transaction.
+		ApplyLane lane = lanes.current();
 		String lastTxId = rows.getLast().txId();
-		transactionTemplate.executeWithoutResult(status -> {
-			applyRuns(rows);
-			if (watermark > 0) {
-				stateStore.record(lastTxId, watermark);
+		lane.transactionTemplate().executeWithoutResult(status -> {
+			applyRuns(lane, rows);
+			// The LSN watermark is a single row per pipeline, so with parallel lanes every
+			// lane's transaction would contend on it and serialise them all — and a global
+			// commit position means little once lanes advance independently. The Kafka
+			// offsets below are already per topic-partition, so they carry restart state
+			// without contention.
+			if (watermark > 0 && lanes.isSingleLane()) {
+				stateStore.record(lane.jdbcTemplate(), lastTxId, watermark);
 			}
+			// Same transaction as the rows: either both are durable or neither is, which
+			// is what makes a replay after a crash recognisable rather than guesswork.
+			offsetStore.record(lane.jdbcTemplate(), positions);
 		});
-		stateStore.committed(watermark);
+		if (lanes.isSingleLane()) {
+			stateStore.committed(watermark);
+		}
 		return rows.size();
 	}
 
@@ -170,13 +183,13 @@ public class ChangeEventApplier {
 	 * touch the same row twice — PostgreSQL raises {@code 21000} rather than applying
 	 * them in order. Cutting the run keeps both changes, in order, as separate commands.
 	 */
-	private void applyRuns(List<ChangeRow> rows) {
+	private void applyRuns(ApplyLane lane, List<ChangeRow> rows) {
 		int index = 0;
 		while (index < rows.size()) {
 			ChangeRow head = rows.get(index);
 			if (head.isTruncate()) {
 				log.info("Applying TRUNCATE to {}", head.table());
-				jdbcTemplate.execute(sqlGenerator.truncate(head.table()));
+				lane.jdbcTemplate().execute(sqlGenerator.truncate(head.table()));
 				index++;
 				continue;
 			}
@@ -206,7 +219,7 @@ public class ChangeEventApplier {
 				run.add(candidate);
 				next++;
 			}
-			execute(statement, run);
+			execute(lane, statement, run);
 			index = next;
 		}
 	}
@@ -225,7 +238,7 @@ public class ChangeEventApplier {
 		if (!schema.hasKey()) {
 			throw new UnrecoverableApplyException("Cannot apply " + row.op() + " to " + row.table()
 					+ ": the change event carries no key. Add a primary key to the source table, "
-					+ "or remove it from producer.table-list.");
+					+ "or stop capturing it in the Connect connector.");
 		}
 		return switch (row.op()) {
 			case c, r -> sqlGenerator.upsert(schema, row.values().keySet());
@@ -254,18 +267,18 @@ public class ChangeEventApplier {
 		return row.values().keySet();
 	}
 
-	private void execute(SqlGenerator.Statement statement, List<ChangeRow> run) {
+	private void execute(ApplyLane lane, SqlGenerator.Statement statement, List<ChangeRow> run) {
 		try {
 			if (run.size() == 1) {
 				ChangeRow row = run.getFirst();
-				int affected = jdbcTemplate.update(statement.sql(), ps -> bind(ps, statement, row));
+				int affected = lane.jdbcTemplate().update(statement.sql(), ps -> bind(ps, statement, row));
 				if (affected == 0 && row.op() == io.cdc.stream.event.OPERATION.u) {
 					log.warn("Update for {} key {} matched no sink row; the sink may be missing this row", row.table(),
 							keyOf(row));
 				}
 				return;
 			}
-			jdbcTemplate.batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
+			lane.jdbcTemplate().batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
 				@Override
 				public void setValues(@NonNull PreparedStatement ps, int i) throws SQLException {
 					bind(ps, statement, run.get(i));

@@ -1,91 +1,97 @@
+# ---------------------------------------------------------------------------
+# Kafka ingestion profile.
+#
+# The source half of the pipeline is gone here: no replication slot, no
+# publication, no Debezium offset table. Kafka Connect owns all of that, and
+# this application only consumes topics and applies rows. The entire producer:
+# block is unused under this profile.
+#
+# Run with: -Dspring-boot.run.profiles=local
+# ---------------------------------------------------------------------------
+
+# sink (apply side) -- unchanged from the embedded profiles
 spring:
   datasource:
-    url: jdbc:yugabytedb://[source2_ip]:5433/[db_name]
+    url: jdbc:yugabytedb://127.0.0.1:5433/acdc
     username: yugabyte
     password: yugabyte
     driver-class-name: com.yugabyte.Driver
 
-# ---------------------------------------------------------------------------
-# source (capture side)
-# ---------------------------------------------------------------------------
-producer:
-  name: cdc-source
-  connector-class: io.debezium.connector.postgresql.YugabyteDBConnector
-  offset-storage: io.debezium.storage.jdbc.offset.JdbcOffsetBackingStore
-  offset-storage-jdbc-url: jdbc:postgresql://[source1_ip]:5433/[db_name]?currentSchema=public
-  offset-storage-jdbc-user: yugabyte
-  offset-storage-jdbc-password: yugabyte
-  offset-storage-jdbc-table: cdc_offset
-  offset-flush-interval-ms: 10000
-  hostname: [source1_ip]
-  port: 5433
-  user: yugabyte
-  password: yugabyte
-  db-name: [db_name]
-  plugin-name: yboutput
-  replication-slot: ybdb
-  # Adding a table here requires a restart, and gets streaming only -- this slot
-  # will never backfill rows the table already holds. Neither snapshot-mode nor
-  # signal-data-collection changes that; a backfill needs a separate slot. See
-  # "Adding a table to the capture set" in the README.
-  table-list: public.products,public.orders,public.users,public.reviews
-  schema-list: public
-  server-id: ybdb
-  server-name: ybdb
-  publication-mode: filtered
-  publication-name: ybdb
-  task-max: 1
-  topic-prefix: ybdb
-  timestamp-precision-mode: adaptive_time_microseconds
-  log-errors-include-messages: true
-  # Required by consumer.enable-transaction-boundary: supplies the BEGIN/END
-  # markers that delimit a source transaction.
-  provide-transaction-metadata: true
-  # Keeps the slot's confirmed LSN advancing while the captured tables are idle.
-  heartbeat-interval-ms: 10000
-  poll-interval-ms: 100
-  max-batch-size: 5000
-  max-queue-size: 10000
-  replica-identity: public.*:FULL
-  snapshot-mode: initial
+kafka:
+  bootstrap-servers: localhost:9092
+  # Also the key under which applied offsets are stored in the sink. Two
+  # deployments writing to the same sink must not share it.
+  consumer-group: cdc-apply
+  # Which topics depends entirely on transaction-scope below.
+  #
+  # global scope -> ONE funnelled topic on ONE partition, carrying every table
+  #   AND the transaction markers. On the Connect side:
+  #     transforms: route
+  #     transforms.route.type: io.debezium.transforms.ByLogicalTableRouter
+  #     transforms.route.topic.regex: (.*)
+  #     transforms.route.topic.replacement: ybdb.all
+  #     transforms.route.key.enforce.uniqueness: false
+  #   and create ybdb.all with partitions=1. The producer must be idempotent
+  #   (Kafka 3.x default) or max.in.flight.requests.per.connection=1, or a
+  #   retry silently reorders within the partition.
+  #
+  # table scope -> ordinary per-table topics. Use topic-pattern rather than an
+  #   explicit list and a new table is picked up without a restart: Debezium
+  #   names them <prefix>.<schema>.<table>, so this follows the capture set as it
+  #   grows. Anchor at the schema -- a bare 'ybdb\..*' would also match
+  #   ybdb.transaction, whose markers mean nothing once partitions are not
+  #   co-ordered.
+  #
+  # Set exactly one of topics / topic-pattern.
+  topic-pattern: "ybdb\\.public\\..*"
+  # topics:
+  #   - ybdb.all
+  max-poll-records: 500
+  auto-offset-reset: earliest
+  # Worst-case delay before a topic newly matching topic-pattern is discovered.
+  # Discovery triggers a rebalance, so do not set this very low.
+  metadata-max-age-ms: 300000
+  # Must stay 1 while consumer.apply-origin-name is set: the apply pool is
+  # pinned to one connection to hold the replication origin, so extra listener
+  # threads would only contend for it. Validated at startup.
+  concurrency: 1
+  # Seek to what the sink durably applied rather than to Kafka's committed
+  # offset. The sink offset is written inside the row transaction, so it cannot
+  # disagree with the data; Kafka's commit happens after and can lag it.
+  seek-to-sink-offset: true
+  offset-table: cdc_kafka_offsets
+  # The apply side derives sink types from the Connect schema, so the connector
+  # must run JsonConverter with schemas.enable=true (or an Avro converter
+  # against a registry). Schemaless JSON cannot drive this pipeline.
+  # json -> no registry to run, but the whole schema is repeated in every message
+  #         (commonly 5-10x on a wide table), which also means fewer records fit a
+  #         fetch and commit units come out smaller than max-poll-records suggests.
+  # avro -> compact, and incompatible source changes are rejected at publish time
+  #         rather than halting this pipeline. Needs -Pavro at build time and a
+  #         schema-registry-url. Anything else is a Converter class name.
+  converter: json
+  # schema-registry-url: http://localhost:8081
+  # converter-properties:
+  #   basic.auth.credentials.source: USER_INFO
+  #   schema.registry.basic.auth.user.info: user:password
+  # json only -- Avro always carries a schema. Must stay true: sink types are
+  # derived from the Connect schema, so schemaless JSON has nothing to derive from.
+  schemas-enabled: true
 
-# ---------------------------------------------------------------------------
-# apply behaviour
-# ---------------------------------------------------------------------------
 consumer:
-  # true  -> buffer each source transaction and commit it atomically; the sink
-  #          never exposes a partial source transaction
-  # false -> commit ordered batches of batch-size rows; order is preserved but a
-  #          source transaction may span several sink commits
-  enable-transaction-boundary: true
-  # Group N adjacent source transactions into one sink commit. Raising this
-  # trades commit granularity for throughput and never exposes a partial
-  # transaction -- it is the throughput lever to reach for, not concurrency.
+  # global -> needs the single-partition funnel described above
+  # table  -> one source transaction's changes to one table; works on ordinary
+  #           per-table topics, needs no markers, and is the option to pick if
+  #           you would rather not funnel
+  transaction-scope: table
   transactions-per-commit: 1
   batch-size: 500
   max-buffered-rows: 50000
   flush-interval-ms: 2000
   drain-interval-ms: 30000
-  # Created in the sink at startup. Stays empty until the first transaction
-  # commits -- the watermark write is inside the row transaction, so a failing
-  # apply rolls it back too.
   apply-state-table: cdc_apply_state
   apply-state-schema: public
-  # Records the commit LSN the sink has reached. Skipping on it is off because a
-  # YugabyteDB slot's LSNs restart low when the slot is recreated, which would
-  # make every new transaction look already-applied. Every statement is
-  # idempotent, so replay is safe without it.
+  # Redundant under Kafka: the offset table already bounds replay exactly, and
+  # a topic offset has none of the slot-recreation hazards an LSN does.
   skip-applied-lsn: false
-  # Replication origin names to discard, matched against source.origin on each
-  # event. This is loop prevention -- see README. Only matches if the writer tags
-  # its transactions with pg_replication_origin_session_setup(); a plain JDBC
-  # write carries no origin at all.
   ignore-origins: []
-  apply-origin-name: atoc
-  ignore-replicated-changes: true
-
-retry:
-  max-attempts: 5
-  multiplier: 3
-  initial-interval-in-ms: 500
-  max-interval-in-ms: 30000

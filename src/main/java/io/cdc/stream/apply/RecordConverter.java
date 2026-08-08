@@ -9,14 +9,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.source.SourceRecord;
+import org.apache.kafka.connect.connector.ConnectRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.stereotype.Component;
 
 /**
- * Turns a Debezium {@link SourceRecord} into a {@link ChangeRow}.
+ * Turns a Debezium change event into a {@link ChangeRow}.
+ *
+ * <p>
+ * Typed on {@link ConnectRecord}, not {@code SourceRecord}: only {@code value()},
+ * {@code key()}, {@code keySchema()} and {@code topic()} are ever read, and all four are
+ * declared there. That is what lets the same converter serve the embedded engine and a
+ * {@code SinkRecord} deserialized from a Kafka topic.
  *
  * <p>
  * Handles the {@code yboutput} column envelope, where each column arrives as
@@ -61,7 +67,7 @@ public class RecordConverter {
 	 * @return the decoded row, or {@code null} when the record carries no row to apply
 	 * (heartbeat, transaction marker, logical decoding message, unsupported operation).
 	 */
-	public ChangeRow convert(SourceRecord record) {
+	public ChangeRow convert(ConnectRecord<?> record) {
 		if (!(record.value() instanceof Struct envelope)) {
 			return null;
 		}
@@ -98,18 +104,18 @@ public class RecordConverter {
 	}
 
 	/** True when the record is a transaction BEGIN/END marker. */
-	public boolean isTransactionMarker(SourceRecord record) {
+	public boolean isTransactionMarker(ConnectRecord<?> record) {
 		return record.value() instanceof Struct value && value.schema().field("status") != null
 				&& value.schema().field(SOURCE) == null;
 	}
 
 	/** True for a transaction END marker, which closes a transaction boundary. */
-	public boolean isTransactionEnd(SourceRecord record) {
+	public boolean isTransactionEnd(ConnectRecord<?> record) {
 		return isTransactionMarker(record) && END.equals(markerStatus(record));
 	}
 
 	/** {@code BEGIN} or {@code END}. Anything else is a marker shape we do not know. */
-	public String markerStatus(SourceRecord record) {
+	public String markerStatus(ConnectRecord<?> record) {
 		return ((Struct) record.value()).getString("status");
 	}
 
@@ -119,7 +125,7 @@ public class RecordConverter {
 	 * END the commit LSN — so two ids for one transaction are not equal and must not be
 	 * compared directly.
 	 */
-	public String markerTransactionId(SourceRecord record) {
+	public String markerTransactionId(ConnectRecord<?> record) {
 		return ((Struct) record.value()).getString("id");
 	}
 
@@ -127,7 +133,7 @@ public class RecordConverter {
 	 * The transaction id with the LSN suffix removed, which is stable across BEGIN and
 	 * END.
 	 */
-	public String markerBaseTransactionId(SourceRecord record) {
+	public String markerBaseTransactionId(ConnectRecord<?> record) {
 		return baseTransactionId(markerTransactionId(record));
 	}
 
@@ -136,7 +142,7 @@ public class RecordConverter {
 	 * transaction — an individual row's {@code source.lsn} is its own position, not the
 	 * transaction's commit point.
 	 */
-	public Long markerCommitLsn(SourceRecord record) {
+	public Long markerCommitLsn(ConnectRecord<?> record) {
 		String id = markerTransactionId(record);
 		int separator = id == null ? -1 : id.indexOf(':');
 		if (separator < 0) {
@@ -163,7 +169,7 @@ public class RecordConverter {
 	 * Comparing it against what actually arrived is the only way to notice that a
 	 * transaction was delivered incomplete.
 	 */
-	public Long markerEventCount(SourceRecord record) {
+	public Long markerEventCount(ConnectRecord<?> record) {
 		return number((Struct) record.value(), "event_count");
 	}
 
@@ -202,7 +208,7 @@ public class RecordConverter {
 	 * fall back to the record key if a connector build ever omits them — without key
 	 * values there is nothing to target.
 	 */
-	private void mergeKey(SourceRecord record, TableSchema schema, Map<String, Object> values) {
+	private void mergeKey(ConnectRecord<?> record, TableSchema schema, Map<String, Object> values) {
 		if (!(record.key() instanceof Struct key) || values.keySet().containsAll(schema.keyColumns())) {
 			return;
 		}

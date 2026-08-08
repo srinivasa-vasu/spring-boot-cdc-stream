@@ -13,11 +13,11 @@ import org.springframework.stereotype.Component;
  * as the rows it describes.
  *
  * <p>
- * Debezium's own offset store is flushed asynchronously (see
- * {@code producer.offset-flush-interval-ms}), so it always lags the apply and re-delivery
- * after a crash is a certainty rather than an edge case. Because this watermark commits
- * atomically with the data, a replayed transaction can be recognised and skipped, which
- * turns at-least-once delivery into effectively exactly-once apply.
+ * Secondary to {@link KafkaOffsetStore} now that ingestion is from Kafka: the offset rows
+ * are what a restart seeks to, and they carry none of the slot-recreation hazards an LSN
+ * does. This remains useful for monitoring how far the sink has got in the source's own
+ * terms, and is written only when there is a single apply lane — lanes advance
+ * independently, so no single value describes their combined progress.
  */
 @Component
 public class ApplyStateStore {
@@ -41,10 +41,12 @@ public class ApplyStateStore {
 	private boolean sequenceChecked;
 
 	public ApplyStateStore(JdbcTemplate jdbcTemplate, ConsumerConfig config,
-			io.cdc.stream.config.ProducerConfig producerConfig) {
+			io.cdc.stream.config.PipelineIdentity identity) {
 		this.jdbcTemplate = jdbcTemplate;
 		this.config = config;
-		this.slot = producerConfig.getReplicationSlot();
+		// Slot name under the embedded engine, consumer group under Kafka. Reading the
+		// slot directly would key every Kafka-mode row on null.
+		this.slot = identity.id();
 		this.table = new TableId(config.getApplyStateSchema(), config.getApplyStateTable());
 	}
 
@@ -100,11 +102,12 @@ public class ApplyStateStore {
 	}
 
 	/**
-	 * Advances the watermark. Must be called from inside the row transaction so it
-	 * commits or rolls back with the rows.
+	 * Advances the watermark. Must be called from inside the row transaction, through the
+	 * lane's own template — any other template is a different connection and so a different
+	 * transaction, which would let the watermark survive a rolled-back apply.
 	 */
-	void record(String txId, long lsn) {
-		jdbcTemplate.update("INSERT INTO " + table.qualified()
+	void record(JdbcTemplate laneTemplate, String txId, long lsn) {
+		laneTemplate.update("INSERT INTO " + table.qualified()
 				+ " (slot_name, last_txn_id, last_lsn, applied_at) VALUES (?, ?, ?, now()) "
 				+ "ON CONFLICT (slot_name) DO UPDATE SET last_txn_id = EXCLUDED.last_txn_id, "
 				+ "last_lsn = EXCLUDED.last_lsn, applied_at = EXCLUDED.applied_at", slot, txId, lsn);

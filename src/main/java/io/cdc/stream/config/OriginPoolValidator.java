@@ -24,6 +24,11 @@ import org.springframework.stereotype.Component;
  * Pool size 1 has a second benefit: since Hikari never exceeds the maximum, the outgoing
  * connection is always closed before its replacement is opened, so a recycle cannot
  * overlap two sessions competing for the same origin.
+ *
+ * <p>
+ * This checks the primary pool, which is apply lane 1. Lanes 2..n are built from it by
+ * {@code DataSourceConfig.applyLanes} with the same size and a different origin each, so
+ * the constraint holds for them by construction.
  */
 @Component
 public class OriginPoolValidator {

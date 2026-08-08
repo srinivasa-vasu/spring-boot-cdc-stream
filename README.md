@@ -6,78 +6,75 @@ Implementing CDC using Spring Boot, Debezium's embedded engine, and YugabyteDB o
 ![cdc](assets/cdc.jpg)
 
 ## Prerequisites
-Before you begin, ensure you have the following installed:
 - Java Development Kit (JDK) 21 or higher: [Download JDK](https://sdkman.io/jdks)
 - Apache Maven: [Download Maven](https://maven.apache.org/download.cgi)
-- Git: [Install Git](https://git-scm.com/downloads)
 - YugabyteDB: [Install YugabyteDB](https://docs.yugabyte.com/stable/reference/configuration/yugabyted/)
-- YugabyteDB Debezium [Connector](https://github.com/yugabyte/debezium/releases/tag/dz.2.5.2.yb.2024.2.3)
+- A Kafka cluster and a Kafka Connect worker
+- YugabyteDB Debezium [Connector](https://github.com/yugabyte/debezium/releases), installed
+  into the **Connect worker** — this application no longer embeds it
 
-## Get Started
-You can find the complete source at [GitHub](https://github.com/srinivasa-vasu/spring-boot-cdc-stream.git). 
+## Architecture
 
-## Step 1: Clone the Repository
-
-```sh
-git clone [REPO]
-
-cd spring-boot-cdc-stream
-```
-
-## Step 2: Install YBDB Debezium connector
-
-```sh
-# download the ybdb connector jar
-wget https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2025.2.3/yugabytedb-source-connector-dz.2.5.2.yb.2025.2.3-jar-with-dependencies.jar
-
-# create ybdb pom
-cat > debezium-yugabyte-2.5.2.Final.pom << EOF
-<project xmlns="http://maven.apache.org/POM/4.0.0" 
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
-                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
-    <groupId>io.debezium</groupId>
-    <artifactId>debezium-yugabyte</artifactId>
-    <version>2.5.2.Final</version>
-    <description>YugabyteDB Debezium Connector</description>
-    <packaging>jar</packaging>
-</project>
-EOF
-
-# install connector to the local repo
-mvn install:install-file \
-  -Dfile=yugabytedb-source-connector-dz.2.5.2.yb.2025.2.3-jar-with-dependencies.jar \
-  -DpomFile=debezium-yugabyte-2.5.2.Final.pom \
-  -DgroupId=io.debezium \
-  -DartifactId=debezium-yugabyte \
-  -Dversion=2.5.2.Final \
-  -Dpackaging=jar
+The source half runs in Kafka Connect; this application is the sink half only.
 
 ```
+YugabyteDB ──▶ Kafka Connect ──▶ Kafka topics ──▶ this app ──▶ YugabyteDB
+  (source)     (YB connector)                     (apply)        (sink)
+```
 
-## Step 3: Configure the Application
+Connect owns the replication slot, the publication and its own offsets. This application
+consumes topics and applies rows, and holds no source-side configuration at all.
 
-Update the `application-[profile].yml` file located in `src/main/resources/` with producer, consumer and datasource connection details.
+## Step 1: Configure the connector
 
-## Step 4: Build and Run the Application
+Publish per-table topics as `<prefix>.<schema>.<table>`, with a converter that keeps the
+Connect schema on the wire:
+
+```properties
+value.converter=org.apache.kafka.connect.json.JsonConverter
+value.converter.schemas.enable=true
+key.converter=org.apache.kafka.connect.json.JsonConverter
+key.converter.schemas.enable=true
+provide.transaction.metadata=true
+```
+
+Or Avro against a registry:
+
+```properties
+value.converter=io.confluent.connect.avro.AvroConverter
+value.converter.schema.registry.url=http://localhost:8081
+key.converter=io.confluent.connect.avro.AvroConverter
+key.converter.schema.registry.url=http://localhost:8081
+```
+
+A schema must arrive either way. The apply side derives sink types from it — `TypeMapper`
+dispatches on Debezium logical names like `io.debezium.time.MicroTimestamp`, and
+`RecordConverter` needs it to spot the `yboutput` `{value, set}` column envelope. Both
+converters preserve those names: JSON carries them inline, Avro round-trips them through
+`connect.name`. Schemaless JSON is the one option that cannot work.
+
+## Step 2: Configure this application
+
+Edit `src/main/resources/application-[profile].yml`: the sink datasource under `spring`,
+ingestion under `kafka`, and apply behaviour under `consumer`.
+
+## Step 3: Build and run
+
 ```sh
 mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] clean install
 
-mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] spring-boot:run 
+mvn -DskipTests -Dspring-boot.run.profiles=[REPLACE_PROFILE] spring-boot:run
 ```
 
-## Step 5: Verify CDC Functionality
-
-To test the CDC pipeline:
-- Insert or update data in the source database.
+The sink tables must already exist with a primary key or unique constraint on the same key
+columns — this pipeline issues no DDL. `SinkPrecondition` checks that up front and names
+what is missing.
 
 ## How the apply side works
 
-Changes are applied by a single-threaded, schema-driven path. There are no per-table queues
-and no worker pool: the replication slot already delivers changes in commit order and the
-embedded engine invokes the consumer on one thread, so concurrency on the apply side would
-only discard a guarantee that already exists. Statements are generated from each record's
+Changes are applied by a schema-driven path with no per-table queues and no worker pool.
+Order comes from the transport, not from re-sorting: Kafka preserves it per partition, and
+the apply side never reorders what it receives. Statements are generated from each record's
 own Connect schema and cached, which is what allows a new source column to flow through
 without a code change.
 
@@ -88,25 +85,113 @@ commit.
 
 ### Commit granularity
 
-`consumer.enable-transaction-boundary` selects what commits as one unit:
+`consumer.transaction-scope` selects what commits as one sink transaction:
 
-| | `false` | `true` |
-|---|---|---|
-| Source order | preserved | preserved |
-| Commit unit | `batch-size` rows | one source transaction |
-| Partial transaction visible in the sink? | yes | **no** |
-| Requires `producer.provide-transaction-metadata` | no | **yes** |
+| | `none` | `table` | `global` |
+|---|---|---|---|
+| Source order | preserved | preserved | preserved |
+| Commit unit | `batch-size` rows | one transaction's changes to one table | one whole source transaction |
+| Partial transaction visible in the sink? | yes | per table only | **no** |
+| Needs BEGIN/END markers | no | no | **yes** |
 
-With the flag on, rows are buffered until the transaction's END marker and committed
-together, so a reader of the sink never observes half a source transaction. A transaction
-that spans several engine batches stays buffered; its offsets are never marked, so an
-incomplete transaction is re-delivered rather than half-applied. The initial snapshot emits
-no transaction markers and falls back to size-based flushing.
+`global` buffers until the transaction's END marker, so a reader never observes half a
+source transaction. A transaction spanning several delivery batches stays buffered and is
+never acknowledged, so an incomplete one is re-delivered rather than half-applied. The
+initial snapshot emits no markers and falls back to size-based flushing.
 
-Offsets advance only after the rows have committed. Alongside them, an LSN watermark is
+`table` needs no markers at all — every row carries its own `txId`, so a change of
+transaction or of table ends the unit. A transaction touching three tables becomes three
+sink transactions, each atomic. This exists because it is the strongest guarantee ordinary
+per-table Kafka topics can support.
+
+Offsets advance only after the rows have committed. Alongside them an LSN watermark is
 written to `consumer.apply-state-table` **inside the same transaction as the rows**, so a
-replay after a crash is recognised and skipped — Debezium's own offset store is flushed
-asynchronously and always lags the apply.
+replay after a crash is recognisable — Debezium's own offset store is flushed asynchronously
+and always lags the apply.
+
+### Ingestion and ordering
+
+**Ordering is a property of the topology, not of the consumer.** Kafka gives per-partition
+order and nothing more, so which `transaction-scope` values are actually available depends
+on how the connector publishes:
+
+| Topology | Supported scope |
+|---|---|
+| Per-table topics (Debezium default) | `none`, `table` |
+| All tables **and** the transaction topic funnelled into one single-partition topic | `none`, `table`, `global` |
+
+The funnel is a `ByLogicalTableRouter` SMT with `topic.regex: (.*)`. Transaction markers
+survive it — the SMT reroutes non-envelope records with their value untouched — which is
+what puts BEGIN/data/END back into one ordered stream. Create the target topic with
+`partitions=1`, and either leave the producer idempotent (the Kafka 3.x default) or set
+`max.in.flight.requests.per.connection=1`, or a retry reorders within the partition and
+nothing tells you.
+
+A single partition costs less than it looks: `ChangeEventApplier` is single-threaded by
+design, so the applier is already the ceiling.
+
+**Offsets are stored in the sink.** `KafkaOffsetStore` writes `(consumer_group, topic,
+partition, offset)` inside the row transaction, and the consumer seeks to that on
+assignment rather than trusting Kafka's committed offset. The sink therefore cannot
+disagree with its own progress record, and replay after a crash or rebalance is bounded and
+exact. This is a better restart key than the LSN watermark beside it — a topic offset has
+none of the slot-recreation hazards that make `skip-applied-lsn` unsafe to enable.
+
+**Both JSON and Avro are supported**, selected by `kafka.converter`. The format never
+reaches the apply side — both yield a Connect `Struct` and `Schema`, and everything below
+the converter works off that — so the choice is about the wire, not correctness:
+
+| | JSON + `schemas.enable=true` | Avro + registry |
+|---|---|---|
+| Payload | Whole schema in **every message**, commonly 5–10× on a wide table | 5-byte header + compact binary |
+| Effective batch | Fat records may not fill `max-poll-records` within `max.partition.fetch.bytes`, so commit units shrink | 500 records fits comfortably |
+| Incompatible source change | Surfaces late, as a halted pipeline from `SinkPrecondition` | Rejected at the connector, before publish |
+| Operational | No registry to run or depend on | Registry must be up to produce and consume |
+
+Avro is not bundled by default — its dependency tree is large and a JSON deployment has no
+use for it. Build with `-Pavro` and set `kafka.converter: avro` plus
+`kafka.schema-registry-url`. `ConverterFactory` loads converters by class name the way
+Connect does, so any other `Converter` implementation can be named directly, with
+`kafka.converter-properties` passed through for registry credentials and subject-naming
+strategies.
+
+**Topics can be discovered dynamically.** Subscription is always by pattern, so
+`kafka.topic-pattern: "ybdb\\.public\\..*"` picks up a newly captured table without a
+restart — Debezium names per-table topics `<prefix>.<schema>.<table>`. Anchor it at the
+schema: a bare `ybdb\..*` would also pull in `ybdb.transaction`, whose markers mean nothing
+once partitions are not co-ordered. Discovery costs a metadata refresh
+(`kafka.metadata-max-age-ms`, five minutes by default) and triggers a rebalance, so it is
+eventual rather than immediate. An explicit `kafka.topics` list still works and is quoted
+into an equivalent exact pattern.
+
+**Replication origins are named per lane.** `consumer.apply-origin-name` is a *prefix*:
+`OriginNames` composes `<prefix>_<slot-or-consumer-group>_<lane>`, so a single-lane pipeline
+claims `cdc_apply_ybdb_1`. The pipeline component stops two deployments sharing a sink from
+colliding, and the lane component is what parallel apply will need — origins are held by one
+session at a time, so each lane needs its own. The names are derived rather than random, so
+a restart reuses the origins it already registered instead of leaking a permanent catalog
+row each time. On the read side `consumer.ignore-origins` matches **prefixes**, so naming
+the family `cdc_apply_ybdb` once covers every lane the peer runs.
+
+**Parallel apply, for `table` scope only.** `kafka.concurrency` gives each listener thread
+its own *apply lane*: a pool of exactly one connection, its own replication origin, and its
+own transaction. One connection per lane rather than one pool of N is forced by how the
+origin is claimed — Hikari's `connectionInitSql` is a single static string, so every
+connection in a pool would claim the same origin and only the first could succeed.
+
+Lanes are rejected with `global` scope, where one partition means one thread could ever
+hold an assignment anyway, and with `skip-applied-lsn`, whose single-row watermark no longer
+describes independently advancing lanes. With more than one lane the LSN watermark is not
+written at all; the per-partition Kafka offsets carry restart state, and they are already
+keyed per partition so lanes never contend.
+
+What you give up is cross-table ordering. Each table stays ordered within its partition, and
+that is what `table` scope already concedes.
+
+**Deployment.** With `concurrency: 1` a single partition means one consumer holds the
+assignment, so run `replicas: 1` with `strategy: Recreate` — a rolling update starts the new
+pod before the old one exits and the two fight over the replication origin. Scaling out is
+via lanes inside one instance, not more instances.
 
 ### Schema changes are not replicated
 

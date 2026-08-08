@@ -15,16 +15,10 @@ import static org.springframework.util.Assert.isTrue;
  * Apply-side configuration.
  *
  * <p>
- * The apply path is always single-threaded and always preserves source order. The
- * {@code enableTransactionBoundary} flag selects <em>what</em> gets committed as one
- * unit:
- * <ul>
- * <li>{@code false} — rows are coalesced into batches of at most {@code batchSize} and
- * committed per batch. Source order is preserved, but a source transaction may be split
- * across several sink commits, so a reader of the sink can observe a partial transaction.
- * <li>{@code true} — rows are buffered per source transaction and the whole transaction
- * is committed atomically. Requires {@code producer.provide-transaction-metadata=true}.
- * </ul>
+ * The apply path is always single-threaded and always preserves the order it received.
+ * {@link TransactionScope} selects <em>what</em> gets committed as one unit — see that
+ * enum, and the ingestion-side note in {@code KafkaChangeEventListener} about which scopes
+ * a given Kafka topology can actually support.
  */
 @Configuration
 @ConfigurationProperties(prefix = "consumer")
@@ -33,14 +27,27 @@ import static org.springframework.util.Assert.isTrue;
 public class ConsumerConfig {
 
 	/**
-	 * Buffer each source transaction and apply it as a single atomic sink transaction.
+	 * What commits as one sink transaction.
+	 *
+	 * <p>
+	 * {@code global} is the strongest and the most demanding: it needs BEGIN/END markers
+	 * delivered in the same ordered stream as the rows. The embedded engine gives that for
+	 * free. On Kafka it holds only if the transaction topic is funnelled into the same
+	 * single partition as the data, because nothing co-orders separate partitions.
+	 *
+	 * <p>
+	 * {@code table} is the option that works on ordinary per-table topics. It uses no
+	 * markers: every row carries its own {@code txId}, so a change of transaction or of
+	 * table ends the unit. A source transaction spanning three tables becomes three sink
+	 * transactions — each one atomic, none of them exposing a partial table — which is the
+	 * most Kafka can offer without cross-partition reassembly.
 	 */
-	private boolean enableTransactionBoundary;
+	private TransactionScope transactionScope = TransactionScope.none;
 
 	/**
 	 * Number of adjacent source transactions to group into one sink commit. Raising this
 	 * trades commit granularity for throughput without ever exposing a partial source
-	 * transaction. Only meaningful when {@code enableTransactionBoundary} is set.
+	 * transaction. Only meaningful when {@code transactionScope} is {@code global}.
 	 */
 	private int transactionsPerCommit = 1;
 
@@ -111,8 +118,13 @@ public class ConsumerConfig {
 	 * <p>
 	 * For this to match anything the writer has to tag its transactions, via
 	 * {@code pg_replication_origin_session_setup(...)} on its session. A plain JDBC write
-	 * carries no origin at all and is indistinguishable from an ordinary application
-	 * write.
+	 * carries no origin at all and is indistinguishable from an ordinary application write.
+	 *
+	 * <p>
+	 * Entries match as <em>prefixes</em>. A peer's origins are a family — see
+	 * {@link OriginNames} — with one name per apply lane, and how many lanes it runs is its
+	 * business. Configure the family prefix once and every lane is covered, so the peer
+	 * adding a lane cannot silently start leaking changes back.
 	 */
 	private Set<String> ignoreOrigins = new LinkedHashSet<>();
 
@@ -146,9 +158,15 @@ public class ConsumerConfig {
 	 * changes worth replicating, and tagging them would cause the peer to discard them.
 	 *
 	 * <p>
+	 * This is the <em>prefix</em> of the actual origin, not the origin itself:
+	 * {@link OriginNames} composes {@code <prefix>_<pipeline>_<lane>} so that the pipeline
+	 * identity disambiguates two deployments sharing a sink, and each apply lane gets its
+	 * own name. With a single lane the claimed origin is {@code <prefix>_<pipeline>_1}.
+	 *
+	 * <p>
 	 * Set against the sink ({@code spring.datasource}), since the origin is session state
-	 * on the writer. Requires {@code spring.datasource.hikari.maximum-pool-size=1},
-	 * because an origin can only be active in one session at a time.
+	 * on the writer. Requires {@code spring.datasource.hikari.maximum-pool-size=1}, because
+	 * an origin can only be active in one session at a time.
 	 */
 	private String applyOriginName;
 
@@ -159,6 +177,18 @@ public class ConsumerConfig {
 	 * have no reason to queue behind row applies.
 	 */
 	private int metadataPoolSize = 2;
+
+	/** What commits as one sink transaction. See {@link #transactionScope}. */
+	public enum TransactionScope {
+
+		/** Ordered batches of {@code batchSize} rows. A transaction may be split. */
+		none,
+		/** One whole source transaction, across every table it touched. Needs markers. */
+		global,
+		/** One source transaction's changes to one table. Needs no markers. */
+		table
+
+	}
 
 	@PostConstruct
 	void validate() {

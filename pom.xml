@@ -28,18 +28,7 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
-		<debz.version>2.5.2.Final</debz.version>
-		<!--
-			Pinned to the version Debezium 2.5.2 declares (version.kafka in
-			debezium-build-parent). Spring Boot 4 manages Kafka to 4.1.x, and
-			connect-json 4.1's JsonConverter calls JsonNode.properties(), added in
-			Jackson 2.15. The debezium-yugabyte uber-jar bundles an unrelocated
-			jackson-databind 2.13.5 that wins classpath order over the 2.21 Maven
-			resolves, so that call dies with NoSuchMethodError. Staying on 3.6.1
-			avoids the call and keeps Debezium on the Kafka it was built against.
-			Revisit when moving to a Debezium build aligned with Kafka 4.x.
-		-->
-		<kafka.version>3.6.1</kafka.version>
+		<confluent.version>7.9.0</confluent.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -52,46 +41,30 @@
 		</dependency>
 
 		<dependency>
-			<groupId>io.debezium</groupId>
-			<artifactId>debezium-embedded</artifactId>
-			<version>${debz.version}</version>
-		</dependency>
-
-		<dependency>
-			<groupId>io.debezium</groupId>
-			<artifactId>debezium-api</artifactId>
-			<version>${debz.version}</version>
-		</dependency>
-
-		<dependency>
-			<groupId>io.debezium</groupId>
-			<artifactId>debezium-storage-jdbc</artifactId>
-			<version>${debz.version}</version>
-		</dependency>
-
-		<dependency>
-			<groupId>io.debezium</groupId>
-			<artifactId>debezium-yugabyte</artifactId>
-			<version>${debz.version}</version>
-		</dependency>
-
-		<dependency>
 			<groupId>com.fasterxml.jackson.datatype</groupId>
 			<artifactId>jackson-datatype-jsr310</artifactId>
 		</dependency>
 
-<!--		<dependency>-->
-<!--			<groupId>org.springframework.retry</groupId>-->
-<!--			<artifactId>spring-retry</artifactId>-->
-<!--		</dependency>-->
+		<dependency>
+			<groupId>org.springframework.kafka</groupId>
+			<artifactId>spring-kafka</artifactId>
+		</dependency>
 
-<!--		<dependency>-->
-<!--			<groupId>com.yugabyte.cdc</groupId>-->
-<!--			<artifactId>debezium-connector-yugabytedb</artifactId>-->
-<!--			<version>1.0</version>-->
-<!--			<scope>system</scope>-->
-<!--			<systemPath>${project.basedir}/lib/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar</systemPath>-->
-<!--		</dependency>-->
+		<!--
+			The apply side is written against the Connect data model: TypeMapper reads
+			Debezium logical type names off the Schema to pick sink types, and
+			RecordConverter needs it to spot the yboutput {value, set} column envelope.
+			connect-json turns topic bytes back into that. Swap for an Avro converter if
+			you run a registry; schemaless JSON cannot drive this pipeline.
+		-->
+		<dependency>
+			<groupId>org.apache.kafka</groupId>
+			<artifactId>connect-api</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.kafka</groupId>
+			<artifactId>connect-json</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.postgresql</groupId>
@@ -121,6 +94,32 @@
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
+
+	<profiles>
+		<!--
+			Avro decoding. Kept out of the default build because the Confluent tree is
+			large and a JSON deployment has no use for it; ConverterFactory loads the
+			converter by name, so this only has to put it on the classpath.
+
+			Build with: mvn -Pavro ...  and set kafka.converter=avro
+		-->
+		<profile>
+			<id>avro</id>
+			<repositories>
+				<repository>
+					<id>confluent</id>
+					<url>https://packages.confluent.io/maven/</url>
+				</repository>
+			</repositories>
+			<dependencies>
+				<dependency>
+					<groupId>io.confluent</groupId>
+					<artifactId>kafka-connect-avro-converter</artifactId>
+					<version>${confluent.version}</version>
+				</dependency>
+			</dependencies>
+		</profile>
+	</profiles>
 
 	<build>
 		<plugins>

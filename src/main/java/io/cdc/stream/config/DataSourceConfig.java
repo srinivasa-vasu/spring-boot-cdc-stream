@@ -1,12 +1,16 @@
 package io.cdc.stream.config;
 
+import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.cdc.stream.apply.ApplyLane;
+import io.cdc.stream.apply.ApplyLanes;
+import java.util.ArrayList;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.regex.Pattern;
+import java.util.List;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +22,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
@@ -56,41 +61,37 @@ public class DataSourceConfig {
 	private final static Logger log = LoggerFactory.getLogger(DataSourceConfig.class);
 
 	/**
-	 * Origin names are interpolated into the init SQL, which cannot be parameterised, so
-	 * the name is restricted to characters that cannot alter the statement.
-	 */
-	private static final Pattern SAFE_ORIGIN_NAME = Pattern.compile("[A-Za-z0-9_.\\-]{1,63}");
-
-	/**
 	 * Row applies and the watermark write. Pinned to one connection and tagged with the
 	 * replication origin.
 	 */
 	@Bean
 	@Primary
 	@ConfigurationProperties("spring.datasource.hikari")
-	public HikariDataSource dataSource(DataSourceProperties properties, ConsumerConfig config) {
+	public HikariDataSource dataSource(DataSourceProperties properties, ConsumerConfig config,
+			PipelineIdentity identity) {
 		HikariDataSource dataSource = properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
 		dataSource.setPoolName("cdc-apply");
 
-		String origin = config.getApplyOriginName();
-		if (origin == null || origin.isBlank()) {
+		String prefix = config.getApplyOriginName();
+		if (prefix == null || prefix.isBlank()) {
 			log.info("consumer.apply-origin-name is not set, so writes are not tagged with a replication origin. "
 					+ "Bidirectional replication needs it, or the peer cannot distinguish this pipeline's applies "
 					+ "from application writes.");
 			return dataSource;
 		}
-		if (!SAFE_ORIGIN_NAME.matcher(origin).matches()) {
-			throw new IllegalStateException(
-					"consumer.apply-origin-name '" + origin + "' must match " + SAFE_ORIGIN_NAME.pattern()
-							+ ". It is interpolated into the connection init SQL, which cannot be parameterised.");
-		}
 
+		// Lane 1 is the only lane today, because the apply path is single-threaded. The
+		// name is composed the same way regardless, so raising concurrency later adds
+		// lanes 2..n beside it rather than renaming this one.
+		String origin = OriginNames.lane(prefix, identity.id(), 1);
 		registerOrigin(properties, origin);
 		dataSource.setConnectionInitSql("SELECT pg_replication_origin_session_setup('" + origin + "')");
 		log.info(
 				"Every connection in the apply pool will claim replication origin '{}', so writes to {} carry it. "
-						+ "The pipeline reading that database will see it as source.origin and must discard it.",
-				origin, properties.determineUrl());
+						+ "The peer reading that database sees it as source.origin and must discard it — configure "
+						+ "its consumer.ignore-origins with the family prefix '{}', which is matched as a prefix and "
+						+ "so covers every lane.",
+				origin, properties.determineUrl(), OriginNames.family(prefix, identity.id()));
 		return dataSource;
 	}
 
@@ -161,7 +162,7 @@ public class DataSourceConfig {
 		}
 		catch (SQLException e) {
 			throw new IllegalStateException("Could not register replication origin '" + origin
-					+ "' on the sink. This needs sufficient privilege and YugabyteDB replication origin support; "
+					+ "' on the sink. This needs sufficient privilege to write pg_replication_origin; "
 					+ "clear consumer.apply-origin-name to disable tagging.", e);
 		}
 	}
@@ -194,6 +195,55 @@ public class DataSourceConfig {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * One apply lane per listener thread.
+	 *
+	 * <p>
+	 * Lane 1 is Spring's own pool, so a single-lane deployment behaves exactly as it did
+	 * before lanes existed. Lanes 2..n are additional pools of one connection each, copied
+	 * from lane 1 so they inherit every setting that matters — {@code reWriteBatchedInserts}
+	 * above all, which the batching in {@code ChangeEventApplier} depends on — and differing
+	 * only in the replication origin their init SQL claims.
+	 *
+	 * <p>
+	 * They are created eagerly rather than on demand, so a lane whose origin is already held
+	 * by another process fails at startup instead of on the first row it tries to apply.
+	 */
+	@Bean
+	public ApplyLanes applyLanes(DataSourceProperties properties, @Qualifier("dataSource") HikariDataSource primary,
+			PlatformTransactionManager transactionManager, ConsumerConfig config, KafkaSourceConfig kafkaConfig,
+			PipelineIdentity identity) {
+		String prefix = config.getApplyOriginName();
+		boolean tagged = prefix != null && !prefix.isBlank();
+		List<ApplyLane> lanes = new ArrayList<>();
+		List<HikariDataSource> owned = new ArrayList<>();
+
+		lanes.add(new ApplyLane(1, tagged ? OriginNames.lane(prefix, identity.id(), 1) : null, new JdbcTemplate(primary),
+				new TransactionTemplate(transactionManager)));
+
+		for (int lane = 2; lane <= kafkaConfig.getConcurrency(); lane++) {
+			String origin = tagged ? OriginNames.lane(prefix, identity.id(), lane) : null;
+			if (origin != null) {
+				registerOrigin(properties, origin);
+			}
+			HikariConfig copy = new HikariConfig();
+			primary.copyStateTo(copy);
+			copy.setPoolName("cdc-apply-" + lane);
+			copy.setMaximumPoolSize(1);
+			copy.setMinimumIdle(1);
+			copy.setConnectionInitSql(
+					origin == null ? null : "SELECT pg_replication_origin_session_setup('" + origin + "')");
+			HikariDataSource dataSource = new HikariDataSource(copy);
+			owned.add(dataSource);
+			lanes.add(new ApplyLane(lane, origin, new JdbcTemplate(dataSource),
+					new TransactionTemplate(new DataSourceTransactionManager(dataSource))));
+		}
+
+		log.info("Apply lanes: {} ({})", lanes.size(),
+				lanes.stream().map(ApplyLane::toString).reduce((a, b) -> a + ", " + b).orElse("none"));
+		return new ApplyLanes(lanes, owned);
 	}
 
 }
