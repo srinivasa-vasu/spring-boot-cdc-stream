@@ -12,7 +12,7 @@
 	<artifactId>stream</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>ChangeEvent</name>
-	<description>Demo project for Spring Boot</description>
+	<description>CDC applier service</description>
 	<url/>
 	<licenses>
 		<license/>
