@@ -1,5 +1,7 @@
 package io.cdc.stream.apply;
 
+import io.cdc.stream.config.ConsumerConfig;
+
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -58,8 +60,35 @@ public class SinkPrecondition {
 	/** Fingerprint of the last schema verified per table, to skip the common case. */
 	private final Map<TableId, String> verified = new ConcurrentHashMap<>();
 
-	public SinkPrecondition(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate) {
+	/** The sink's real columns per table, so the applier can narrow rows onto them. */
+	private final Map<TableId, Set<String>> knownColumns = new ConcurrentHashMap<>();
+
+	/**
+	 * When to look at the sink again, for tables known to be missing columns.
+	 *
+	 * <p>
+	 * Present only while a table is degraded. The fingerprint describes the source, so it
+	 * cannot expire when the <em>sink</em> is what changed — and a sink migration is exactly
+	 * how this state is meant to be resolved.
+	 */
+	private final Map<TableId, Long> recheckAfter = new ConcurrentHashMap<>();
+
+	/** Missing columns last reported per table, so a steady state is not re-warned. */
+	private final Map<TableId, List<String>> reportedMissing = new ConcurrentHashMap<>();
+
+	private final ConsumerConfig config;
+
+	public SinkPrecondition(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate, ConsumerConfig config) {
 		this.jdbcTemplate = jdbcTemplate;
+		this.config = config;
+	}
+
+	/**
+	 * The sink's columns for a table, or null if it has not been verified yet — a truncate
+	 * carries no schema and so never is.
+	 */
+	Set<String> columnsOf(TableId table) {
+		return knownColumns.get(table);
 	}
 
 	/**
@@ -69,10 +98,15 @@ public class SinkPrecondition {
 	 * retryable: no amount of waiting fixes a missing column.
 	 */
 	public void verify(TableSchema schema) {
-		if (schema == null || schema.fingerprint().equals(verified.get(schema.table()))) {
+		if (schema == null) {
+			return;
+		}
+		boolean sameShape = schema.fingerprint().equals(verified.get(schema.table()));
+		if (sameShape && !dueForRecheck(schema.table())) {
 			return;
 		}
 		Map<String, String> sink = sinkColumns(schema.table());
+		knownColumns.put(schema.table(), Set.copyOf(sink.keySet()));
 		if (sink.isEmpty()) {
 			throw new UnrecoverableApplyException(String.format(
 					"Sink table %s does not exist. This pipeline replicates data only and will not create it — "
@@ -82,8 +116,24 @@ public class SinkPrecondition {
 		verifyColumns(schema, sink);
 		verifyConflictTarget(schema);
 		verified.put(schema.table(), schema.fingerprint());
-		log.info("Sink table {} accepts the change event schema: {} column(s), key {}", schema.table(),
-				schema.columns().size(), schema.keyColumns());
+		if (sameShape) {
+			// A recheck of a shape already seen: only interesting if something changed,
+			// which verifyColumns reports for itself.
+			log.debug("Re-checked sink table {}", schema.table());
+		}
+		else {
+			log.info("Sink table {} accepts the change event schema: {} column(s), key {}", schema.table(),
+					schema.columns().size(), schema.keyColumns());
+		}
+	}
+
+	/**
+	 * Whether a degraded table is due another look. Healthy tables never are — they are
+	 * cached on the fingerprint alone and cost nothing.
+	 */
+	private boolean dueForRecheck(TableId table) {
+		Long due = recheckAfter.get(table);
+		return due != null && System.currentTimeMillis() >= due;
 	}
 
 	/**
@@ -117,10 +167,33 @@ public class SinkPrecondition {
 				.add(String.format("%s (sink '%s', source maps to '%s' — %s)", name, existing, column.sqlType(), remedy));
 		});
 		if (!missing.isEmpty()) {
-			throw new UnrecoverableApplyException(String.format(
-					"Sink table %s is missing column(s) %s that the change events carry. This pipeline replicates data "
-							+ "only and will not add them — migrate the sink and restart.",
-					schema.table(), missing));
+			if (config.getUnknownColumns() == ConsumerConfig.UnknownColumns.fail) {
+				throw new UnrecoverableApplyException(String.format(
+						"Sink table %s is missing column(s) %s that the change events carry, and "
+								+ "consumer.unknown-columns is 'fail'. Migrate the sink and restart, or use "
+								+ "'skipIfNull' to keep applying while their values are null.",
+						schema.table(), missing));
+			}
+			// Deliberately not fatal: whether this loses anything depends on the values,
+			// which only ColumnProjection can see, one row at a time.
+			if (!missing.equals(reportedMissing.get(schema.table()))) {
+				log.warn("Sink table {} is missing column(s) {} that the change events carry. They will be left out "
+						+ "of writes while their values are null, and the first non-null value will stop the "
+						+ "pipeline. Migrating the sink clears this within {}ms — no restart needed.", schema.table(),
+						missing, config.getSinkRecheckIntervalMs());
+				reportedMissing.put(schema.table(), List.copyOf(missing));
+			}
+			else {
+				log.debug("Sink table {} is still missing column(s) {}", schema.table(), missing);
+			}
+			recheckAfter.put(schema.table(), System.currentTimeMillis() + config.getSinkRecheckIntervalMs());
+		}
+		else if (reportedMissing.remove(schema.table()) != null) {
+			// The migration landed. Say so — this is the message that tells an operator
+			// their change took effect.
+			recheckAfter.remove(schema.table());
+			log.info("Sink table {} now has every column the change events carry; nothing is being left out of "
+					+ "writes any more.", schema.table());
 		}
 		if (!incompatible.isEmpty()) {
 			throw new UnrecoverableApplyException(String.format(
@@ -197,6 +270,9 @@ public class SinkPrecondition {
 	/** Forget cached state so the next event re-reads the sink. Used after a failure. */
 	void invalidate(TableId table) {
 		verified.remove(table);
+		knownColumns.remove(table);
+		recheckAfter.remove(table);
+		reportedMissing.remove(table);
 	}
 
 }

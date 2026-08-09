@@ -9,7 +9,7 @@
 # Run with: -Dspring-boot.run.profiles=local
 # ---------------------------------------------------------------------------
 
-# sink (apply side) -- unchanged from the embedded profiles
+# sink (apply side)
 spring:
   datasource:
     url: jdbc:yugabytedb://127.0.0.1:5433/acdc
@@ -22,9 +22,13 @@ kafka:
   # Also the key under which applied offsets are stored in the sink. Two
   # deployments writing to the same sink must not share it.
   consumer-group: cdc-apply
-  # Distinguishes this instance from others in the same group. Only needed for
-  # multi-instance deployments with apply-origin-name set, and must be stable
-  # across restarts -- see application-cloud.yml for the full rationale.
+  # Distinguishes this instance from others in the same group. Only needed when
+  # several instances share the group AND consumer.apply-origin-name is set:
+  # origin names derive from the pipeline identity, so without this every
+  # instance derives the same ones and only the first to start can claim them.
+  # Must be STABLE across restarts -- origins are permanent catalog rows, so a
+  # random or per-restart value leaks a family each time. A StatefulSet ordinal
+  # is the natural source; KAFKA_INSTANCE_ID binds here by relaxed binding.
   # instance-id: "0"
   # Which topics depends entirely on transaction-scope below.
   #
@@ -48,9 +52,9 @@ kafka:
   #
   # Set exactly one of topics / topic-pattern.
 #  topic-pattern: "ybdb\\.public\\..*"
-  topic-pattern: "ybdb\\.all"
-  # topics:
-  #   - ybdb.all
+#  topic-pattern: "ybdb\\.all"
+  topics:
+    - ybdb.all
   max-poll-records: 500
   auto-offset-reset: earliest
   # Worst-case delay before a topic newly matching topic-pattern is discovered.
@@ -88,7 +92,7 @@ consumer:
   # table  -> one source transaction's changes to one table; works on ordinary
   #           per-table topics, needs no markers, and is the option to pick if
   #           you would rather not funnel
-  transaction-scope: table
+  transaction-scope: global
   transactions-per-commit: 1
   batch-size: 500
   max-buffered-rows: 50000
@@ -96,6 +100,19 @@ consumer:
   drain-interval-ms: 30000
   apply-state-table: cdc_apply_state
   apply-state-schema: public
+  # What to do about a column the change events carry that the sink lacks.
+  # skipIfNull -> leave it out of the write while its value is null, and fail
+  #               naming the column and key on the first non-null one. A source
+  #               column added ahead of the sink migration is routine; halting
+  #               every lane over one that may never carry a value is a large
+  #               blast radius. Nothing is lost silently.
+  # fail       -> refuse to apply the table at all, before any row is written.
+  unknown-columns: skipIfNull
+  # Verification is keyed on the schema fingerprint, which describes the SOURCE --
+  # so when the fix is a sink migration the fingerprint never changes and the
+  # cached result would never expire. This bounds that window, and applies only
+  # while a table is degraded.
+  sink-recheck-interval-ms: 30000
   # Redundant under Kafka: the offset table already bounds replay exactly, and
   # a topic offset has none of the slot-recreation hazards an LSN does.
   skip-applied-lsn: false

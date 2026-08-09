@@ -1,7 +1,7 @@
 package io.cdc.stream.event;
 
 /**
- * How the dispatcher tells a transport that an event is safely applied.
+ * Dispatcher tells a transport that an event is safely applied.
  *
  * <p>
  * Called only after the rows have committed to the sink — never before. Marking an event

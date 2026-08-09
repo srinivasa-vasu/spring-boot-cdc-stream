@@ -80,7 +80,6 @@ public class ChangeEventApplier {
 	 * unavailable, as during the initial snapshot.
 	 * @param positions Kafka coordinates covered by this unit, written inside the same
 	 * transaction so the sink — not Kafka's committed offset — is the authority on progress.
-	 * Empty for the embedded engine, which has no offsets of its own to record here.
 	 * @return number of rows written
 	 */
 	@SneakyThrows
@@ -110,12 +109,17 @@ public class ChangeEventApplier {
 		// should fail before any of them is written.
 		distinctSchemas(rows).values().forEach(sinkPrecondition::verify);
 
+		// After verification, because it needs the sink's real columns. A source column the
+		// sink lacks is dropped when its value is null and fatal when it is not — the
+		// schema-level check cannot make that call, since it never sees a value.
+		List<ChangeRow> pending = project(rows);
+
 		// This thread's lane, and therefore this thread's connection. Everything below
 		// must go through it or it lands outside the transaction.
 		ApplyLane lane = lanes.current();
-		String lastTxId = rows.getLast().txId();
+		String lastTxId = pending.getLast().txId();
 		lane.transactionTemplate().executeWithoutResult(status -> {
-			applyRuns(lane, rows);
+			applyRuns(lane, pending);
 			// The LSN watermark is a single row per pipeline, so with parallel lanes every
 			// lane's transaction would contend on it and serialise them all — and a global
 			// commit position means little once lanes advance independently. The Kafka
@@ -131,7 +135,26 @@ public class ChangeEventApplier {
 		if (lanes.isSingleLane()) {
 			stateStore.committed(watermark);
 		}
-		return rows.size();
+		return pending.size();
+	}
+
+	/**
+	 * Narrows every row onto the columns the sink actually has. Returns the same list when
+	 * nothing needs narrowing, which is the common case.
+	 */
+	private List<ChangeRow> project(List<ChangeRow> rows) {
+		List<ChangeRow> projected = null;
+		for (int i = 0; i < rows.size(); i++) {
+			ChangeRow row = rows.get(i);
+			ChangeRow narrowed = ColumnProjection.project(row, sinkPrecondition.columnsOf(row.table()));
+			if (narrowed != row && projected == null) {
+				projected = new ArrayList<>(rows.subList(0, i));
+			}
+			if (projected != null) {
+				projected.add(narrowed);
+			}
+		}
+		return projected == null ? rows : projected;
 	}
 
 	private long highestRowLsn(List<ChangeRow> rows) {

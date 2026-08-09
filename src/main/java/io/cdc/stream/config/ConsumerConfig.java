@@ -171,6 +171,52 @@ public class ConsumerConfig {
 	private String applyOriginName;
 
 	/**
+	 * What to do about a column the change events carry that the sink does not have.
+	 *
+	 * <p>
+	 * {@code skipIfNull} — the default — leaves the column out of the write when its value
+	 * is null, and fails naming the column and key when it is not. This is the operable
+	 * choice: a source column added ahead of the sink migration is a routine, temporary
+	 * state, and halting the entire pipeline over one that may never carry a value is a
+	 * large blast radius for nothing. Nothing is lost silently, because the decision is made
+	 * per row against the actual value.
+	 *
+	 * <p>
+	 * {@code fail} restores the stricter behaviour: refuse to start applying a table whose
+	 * events carry any column the sink lacks, before a single row is written. Use it when
+	 * the sink is expected to be exactly in step with the source and you would rather find
+	 * out at startup.
+	 */
+	private UnknownColumns unknownColumns = UnknownColumns.skipIfNull;
+
+	/**
+	 * How long a sink shape stays cached once it is known to be missing columns.
+	 *
+	 * <p>
+	 * Verification is normally keyed on the schema fingerprint, which describes the
+	 * <em>source</em>. That is the right key for detecting source DDL — it is the only
+	 * signal available, since logical decoding emits none — but it says nothing about the
+	 * sink. So when the fix is a sink migration, the fingerprint never changes, the cached
+	 * result never expires, and the pipeline keeps dropping a column that now exists until
+	 * it is restarted. Someone does exactly the right thing and nothing happens.
+	 *
+	 * <p>
+	 * This bounds that window. It applies <em>only</em> while a table is known to be missing
+	 * columns; a healthy table is still verified once per schema shape and costs nothing.
+	 */
+	private int sinkRecheckIntervalMs = 30_000;
+
+	/** See {@link #unknownColumns}. */
+	public enum UnknownColumns {
+
+		/** Omit the column when its value is null; fail when it is not. */
+		skipIfNull,
+		/** Refuse to apply the table at all. */
+		fail
+
+	}
+
+	/**
 	 * Size of the secondary pool used for the sink precondition check —
 	 * {@code DatabaseMetaData} reads. Separate from the apply pool because that one is
 	 * pinned to a single connection to hold the replication origin, and metadata reads
@@ -198,6 +244,7 @@ public class ConsumerConfig {
 		isTrue(transactionsPerCommit > 0, "consumer.transactions-per-commit must be greater than 0");
 		isTrue(maxBufferedRows >= batchSize, "consumer.max-buffered-rows must be greater than consumer.batch-size");
 		isTrue(metadataPoolSize >= 1, "consumer.metadata-pool-size must be at least 1");
+		isTrue(sinkRecheckIntervalMs > 0, "consumer.sink-recheck-interval-ms must be greater than 0");
 	}
 
 }
