@@ -31,10 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
-/src/main/resources/application-cloud.yml
+/src/main/resources/application-a2b.yml
 /.mvn/
 /mvnw
 /mvnw.cmd
 /lib/debezium-connector-yugabytedb-dz.2.5.2.yb.2024.2.3-jar-with-dependencies.jar
 /. springjavaformatconfig
 /src/main/resources/application-kafka.yml
+/src/main/resources/application-b2a.yml

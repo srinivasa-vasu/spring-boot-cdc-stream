@@ -39,9 +39,15 @@ public class RecordConverter {
 	private static final String SOURCE = "source";
 
 	/**
-	 * Replication origin name, populated from the logical decoding ORIGIN message.
-	 * Present on transactions that were replayed from another origin rather than written
-	 * directly.
+	 * Replication origin name, carried by the logical decoding ORIGIN message and present
+	 * on transactions that were replayed from another origin rather than written directly.
+	 *
+	 * <p>
+	 * The whole path is verified end to end: {@code yboutput} emits the pgoutput ORIGIN
+	 * message with the name, the connector's {@code handleOriginMessage} turns it into an
+	 * {@code OriginMessage}, and the source struct maker writes it here. So the name is what
+	 * arrives — despite the WAL itself storing an {@code xrepl_origin_id}, which no
+	 * connector build surfaces and which nothing here should look for.
 	 */
 	private static final String ORIGIN = "origin";
 
