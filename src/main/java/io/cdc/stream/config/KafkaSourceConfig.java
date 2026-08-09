@@ -41,6 +41,30 @@ public class KafkaSourceConfig {
 	private String consumerGroup = "cdc-apply";
 
 	/**
+	 * Distinguishes this instance from others in the same consumer group.
+	 *
+	 * <p>
+	 * Only needed when more than one instance runs in a group <em>and</em>
+	 * {@code consumer.apply-origin-name} is set. Replication origin names are derived from
+	 * the pipeline identity. Without this the identity is just the consumer group — so
+	 * every instance would derive the same names, and the second to start would fail to
+	 * claim an origin already held by the first.
+	 *
+	 * <p>
+	 * <b>It must be stable across restarts of the same instance.</b> Origins are permanent
+	 * catalog rows that nothing drops, so an identity that changes on every restart — a
+	 * random value, or a Deployment's pod name — leaks one origin family per restart until
+	 * the catalog is full. A StatefulSet ordinal is the natural source; an explicit env var
+	 * per deployment works anywhere. {@code KAFKA_INSTANCE_ID} binds here by relaxed
+	 * binding.
+	 *
+	 * <p>
+	 * Left unset, the identity stays the consumer group alone, which is what a
+	 * single-instance deployment already uses — so setting nothing changes nothing.
+	 */
+	private String instanceId;
+
+	/**
 	 * Explicit topics to consume. Mutually exclusive with {@link #topicPattern}.
 	 *
 	 * <p>
@@ -91,11 +115,38 @@ public class KafkaSourceConfig {
 	private int metadataMaxAgeMs = 300_000;
 
 	/**
-	 * Listener threads. Must stay at 1 while {@code consumer.apply-origin-name} is set: the
-	 * apply pool holds a replication origin and is therefore pinned to one connection, so a
-	 * second thread would only contend for it.
+	 * Listener threads, and therefore apply lanes — each gets its own single-connection pool
+	 * and its own replication origin.
+	 *
+	 * <p>
+	 * <b>This bounds threads, not topics.</b> Subscribe to as many topics as you like: Kafka
+	 * spreads every assigned partition across the available consumers, so 100 tables with
+	 * four lanes means each lane owns roughly 25 partitions and works through them. Many
+	 * partitions per lane is the normal case.
+	 *
+	 * <p>
+	 * The relationship runs one way only. Kafka never assigns more consumers than there are
+	 * partitions, so a lane beyond the assigned partition count idles — while still holding a
+	 * connection and a permanently registered origin. That, not this ceiling, is the useful
+	 * maximum.
+	 *
+	 * <p>
+	 * {@link #MAX_CONCURRENCY} is a backstop against a typo rather than a tuning target.
+	 * Every lane is a standing cost on the sink: one connection held open, one row in
+	 * {@code pg_replication_origin} that nothing drops, and one more writer contending for
+	 * the same tablets. Replication-adjacent budgets on YugabyteDB are small — the related
+	 * {@code max_replication_slots} defaults to 10, itself shared with the internal
+	 * {@code yb_notifications_*} slot each TServer creates — so a number anywhere near this
+	 * ceiling deserves justifying rather than assuming.
+	 *
+	 * <p>
+	 * Only meaningful with {@code consumer.transaction-scope=table}; global scope needs a
+	 * single partition and so can never use more than one lane.
 	 */
 	private int concurrency = 1;
+
+	/** Backstop, not a target. See {@link #concurrency}. */
+	public static final int MAX_CONCURRENCY = 16;
 
 	/**
 	 * On partition assignment, seek to the offset the sink says it durably applied rather
@@ -179,10 +230,21 @@ public class KafkaSourceConfig {
 	}
 
 	@PostConstruct
-	void validate() {
+	public void validate() {
 		isTrue(maxPollRecords > 0, "kafka.max-poll-records must be greater than 0");
 		isTrue(concurrency >= 1, "kafka.concurrency must be at least 1");
+		isTrue(concurrency <= MAX_CONCURRENCY,
+				String.format("kafka.concurrency is %d, above the ceiling of %d. Each lane holds a sink connection "
+						+ "and registers a replication origin that nothing removes. Note this bounds listener "
+						+ "threads, not topics — any number of topics is fine, and their partitions are shared "
+						+ "across the lanes. If you genuinely need more lanes, raise MAX_CONCURRENCY deliberately "
+						+ "after checking the sink's connection budget.", concurrency, MAX_CONCURRENCY));
 		isTrue(metadataMaxAgeMs > 0, "kafka.metadata-max-age-ms must be greater than 0");
+		isTrue(instanceId == null || instanceId.isBlank()
+				|| (OriginNames.SAFE.matcher(instanceId).matches() && instanceId.length() <= OriginNames.MAX_COMPONENT),
+				"kafka.instance-id must match " + OriginNames.SAFE.pattern() + " and be at most "
+						+ OriginNames.MAX_COMPONENT + " characters: it becomes part of a replication origin name, "
+						+ "which is interpolated into connection init SQL and cannot be parameterised");
 		boolean avro = ConverterFactory.AVRO.equals(ConverterFactory.className(converter));
 		isTrue(!avro || (schemaRegistryUrl != null && !schemaRegistryUrl.isBlank()),
 				"kafka.converter=avro requires kafka.schema-registry-url — the converter cannot resolve a schema id "

@@ -10,7 +10,13 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
- * Fails startup if the pool is sized such that replication-origin tagging cannot work.
+ * Fails startup if the apply pool is sized such that replication-origin tagging cannot work.
+ *
+ * <p>
+ * This constrains a <em>pool</em>, not the pipeline. Parallel apply is still available: each
+ * listener thread gets its own single-connection pool with its own origin — see
+ * {@code DataSourceConfig.applyLanes} — so the total connection count is
+ * {@code kafka.concurrency}, while each individual pool stays at one.
  *
  * <p>
  * A replication origin can be held by one session at a time. With more than one pooled
@@ -52,11 +58,14 @@ public class OriginPoolValidator {
 		}
 		if (hikari.getMaximumPoolSize() != 1) {
 			throw new IllegalStateException(String.format("consumer.apply-origin-name is set to '%s', which requires "
-					+ "spring.datasource.hikari.maximum-pool-size=1 (currently %d). A replication origin can "
-					+ "be held by only one session at a time, so any further connection would fail to claim "
-					+ "it and the pool could not be filled.", origin, hikari.getMaximumPoolSize()));
+					+ "spring.datasource.hikari.maximum-pool-size=1 (currently %d). An origin is claimed by the "
+					+ "pool's connection-init SQL, which is one static string, so every connection in a pool would "
+					+ "claim the same origin and only the first could succeed. "
+					+ "This is a per-pool limit, not a limit on parallelism: raise kafka.concurrency instead and "
+					+ "each listener thread gets its own single-connection pool with its own origin.",
+					origin, hikari.getMaximumPoolSize()));
 		}
-		log.info("Pool sized to 1 connection, holding replication origin '{}'. Init SQL: {}", origin,
+		log.info("Apply lane 1 sized to 1 connection, holding a replication origin. Init SQL: {}",
 				hikari.getConnectionInitSql());
 	}
 

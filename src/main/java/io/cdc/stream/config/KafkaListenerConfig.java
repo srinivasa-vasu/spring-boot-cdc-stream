@@ -10,11 +10,13 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.connect.storage.Converter;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
@@ -32,6 +34,7 @@ import org.springframework.kafka.listener.ConsumerAwareRebalanceListener;
  * schemas and Avro equivalent.
  */
 @Configuration
+@EnableKafka
 public class KafkaListenerConfig {
 
 	private final static Logger log = LoggerFactory.getLogger(KafkaListenerConfig.class);
@@ -130,12 +133,18 @@ public class KafkaListenerConfig {
 			ChangeEventDispatcher dispatcher) {
 		return new ConsumerAwareRebalanceListener() {
 			@Override
-			public void onPartitionsRevokedBeforeCommit(Consumer<?, ?> consumer, Collection<TopicPartition> partitions) {
+			public void onPartitionsRevokedBeforeCommit(@NonNull Consumer<?, ?> consumer, @NonNull Collection<TopicPartition> partitions) {
 				dispatcher.discardUncommitted();
 			}
 
 			@Override
-			public void onPartitionsAssigned(Consumer<?, ?> consumer, Collection<TopicPartition> partitions) {
+			public void onPartitionsAssigned(@NonNull Consumer<?, ?> consumer, @NonNull Collection<TopicPartition> partitions) {
+				log.info("Assigned {} partition(s): {}", partitions.size(), partitions);
+				if (partitions.isEmpty()) {
+					log.warn("No partitions assigned. The subscription pattern '{}' matched no topic, or another "
+							+ "member of group '{}' holds them all.", config.subscriptionPattern(),
+							config.getConsumerGroup());
+				}
 				if (!config.isSeekToSinkOffset()) {
 					return;
 				}

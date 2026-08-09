@@ -85,10 +85,15 @@ public class KafkaChangeEventListener {
 		}
 		if (events.isEmpty()) {
 			// Nothing to apply, but the offsets must still move or the poll repeats
-			// forever.
+			// forever. Worth saying out loud: a batch that is entirely tombstones or
+			// entirely undecodable would otherwise vanish without trace.
+			log.warn("Received {} record(s) but none decoded to a change event; acknowledging without applying",
+					records.size());
 			acknowledgment.acknowledge();
 			return;
 		}
+		log.debug("Received {} record(s), {} decoded, from {}", records.size(), events.size(),
+				records.getFirst().topic());
 		dispatcher.handleBatch(events, new BatchAcknowledger(acknowledgment));
 	}
 

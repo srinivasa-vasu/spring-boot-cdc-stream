@@ -13,8 +13,8 @@ import java.util.stream.IntStream;
  * resolves to the same string, so restarting reuses the origins it already registered.
  *
  * <p>
- * A random suffix per session would also give each lane a private origin, but origins are
- * permanent catalog rows that nothing drops — every restart would leak one, the roident
+ * A random suffix per session would also give each lane a private origin. However, origins are
+ * permanent catalog rows that nothing drops — every restart would leak one, the address
  * space is 16 bits, and the number simultaneously in use is bounded by
  * {@code max_replication_slots}. A bounded, derived set has none of that: at most
  * {@code concurrency} origins ever exist for a pipeline.
@@ -31,11 +31,24 @@ import java.util.stream.IntStream;
 public final class OriginNames {
 
 	/**
-	 * Origin names are interpolated into connection init SQL, which cannot be
-	 * parameterised, so every component is restricted to characters that cannot alter the
-	 * statement.
+	 * Origin names are interpolated into connection init SQL, which cannot be parameterised,
+	 * so every component is restricted to characters that cannot alter the statement. This
+	 * is the only constraint the database forces on us — YugabyteDB documents the origin
+	 * name as a free-form text identifier, and {@code pg_replication_origin.roname} is
+	 * {@code text}, so there is no {@code NAMEDATALEN} limit to respect.
 	 */
-	static final Pattern SAFE = Pattern.compile("[A-Za-z0-9_.\\-]{1,63}");
+	static final Pattern SAFE = Pattern.compile("[A-Za-z0-9_.\\-]+");
+
+	/**
+	 * Per-component length. Self-imposed: a single prefix, consumer group or instance id
+	 * longer than this is a naming problem worth surfacing, not something the database
+	 * objects to.
+	 */
+	static final int MAX_COMPONENT = 63;
+
+	// No separate limit on the composed name: capping each component already bounds it at
+	// roughly 130 characters, and the column is free-form text. A second check there could
+	// never fire.
 
 	private OriginNames() {
 	}
@@ -51,17 +64,9 @@ public final class OriginNames {
 	 */
 	public static String lane(String prefix, String pipeline, int lane) {
 		if (lane < 1) {
-			throw new IllegalArgumentException("Origin lane is 1-based; got " + lane);
+			throw new IllegalArgumentException("Origin lane is number based; got " + lane);
 		}
-		String name = family(prefix, pipeline) + '_' + lane;
-		if (!SAFE.matcher(name).matches()) {
-			throw new IllegalStateException(String.format(
-					"Composed replication origin name '%s' must match %s. It is interpolated into the connection "
-							+ "init SQL, which cannot be parameterised. Shorten consumer.apply-origin-name or the "
-							+ "slot/consumer-group name.",
-					name, SAFE.pattern()));
-		}
-		return name;
+		return family(prefix, pipeline) + '_' + lane;
 	}
 
 	/** Every lane name for the given concurrency, in order. */
@@ -81,6 +86,11 @@ public final class OriginNames {
 					"Replication origin name component '%s' must match %s, because it is interpolated into the "
 							+ "connection init SQL and cannot be parameterised.",
 					component, SAFE.pattern()));
+		}
+		if (component.length() > MAX_COMPONENT) {
+			throw new IllegalStateException(String.format(
+					"Replication origin name component '%s' is %d characters, over the %d this pipeline allows.",
+					component, component.length(), MAX_COMPONENT));
 		}
 		return component;
 	}

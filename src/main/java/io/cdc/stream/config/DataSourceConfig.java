@@ -80,9 +80,12 @@ public class DataSourceConfig {
 			return dataSource;
 		}
 
-		// Lane 1 is the only lane today, because the apply path is single-threaded. The
-		// name is composed the same way regardless, so raising concurrency later adds
-		// lanes 2..n beside it rather than renaming this one.
+		if (!identity.isPerInstance()) {
+			log.warn("Replication origin family '{}' is derived from the consumer group alone, so every instance in "
+					+ "that group would claim the same origins and only the first to start could succeed. Running "
+					+ "more than one instance requires kafka.instance-id — stable per instance, never random, since "
+					+ "origins are permanent catalog rows.", OriginNames.family(prefix, identity.id()));
+		}
 		String origin = OriginNames.lane(prefix, identity.id(), 1);
 		registerOrigin(properties, origin);
 		dataSource.setConnectionInitSql("SELECT pg_replication_origin_session_setup('" + origin + "')");

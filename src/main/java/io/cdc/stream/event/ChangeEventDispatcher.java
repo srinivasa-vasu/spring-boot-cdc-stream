@@ -73,6 +73,16 @@ public class ChangeEventDispatcher {
 	private final AtomicLong filtered = new AtomicLong();
 
 	/**
+	 * Records that reached the converter and produced nothing. Counted and reported because
+	 * the alternative is invisible: a batch every record of which is undecodable is
+	 * acknowledged and forgotten, which from the outside is indistinguishable from
+	 * consuming nothing at all.
+	 */
+	private final AtomicLong undecodable = new AtomicLong();
+
+	private volatile boolean reportedUndecodable;
+
+	/**
 	 * Origins seen on the stream, logged once each. This is the only direct evidence that a
 	 * writer's replication origin actually reaches the WAL and survives decoding — the
 	 * write-side "Claimed replication origin" message proves only that the session took it.
@@ -148,6 +158,7 @@ public class ChangeEventDispatcher {
 
 		ChangeRow row = converter.convert(record);
 		if (row == null) {
+			reportUndecodable(record);
 			skip(event, ack);
 			return;
 		}
@@ -178,6 +189,37 @@ public class ChangeEventDispatcher {
 		if (shouldFlush(row)) {
 			flush(ack);
 		}
+	}
+
+	/**
+	 * Names the first record that decodes to nothing, and keeps a count of the rest.
+	 *
+	 * <p>
+	 * Almost always a topology problem rather than a data problem, and the two usual causes
+	 * are worth naming outright: an {@code ExtractNewRecordState} SMT on the connector,
+	 * which unwraps the envelope so there is no {@code op} or {@code source} left to read,
+	 * and {@code schemas.enable=false} on the producer's JSON converter, which leaves no
+	 * schema at all. Both discard every record silently otherwise.
+	 */
+	private void reportUndecodable(ConnectRecord<?> record) {
+		long seen = undecodable.incrementAndGet();
+		if (reportedUndecodable) {
+			if (seen % 10_000 == 0) {
+				log.warn("{} records so far carried no change event and were discarded", seen);
+			}
+			return;
+		}
+		reportedUndecodable = true;
+		Object value = record.value();
+		String shape = value == null ? "null value (tombstone?)"
+				: value instanceof org.apache.kafka.connect.data.Struct struct
+						? "fields " + struct.schema().fields().stream()
+							.map(org.apache.kafka.connect.data.Field::name).toList()
+						: value.getClass().getName();
+		log.warn("Record on topic '{}' carries no change event and was discarded: {}. Every record of this shape will "
+				+ "be dropped. Expected a Debezium envelope with 'op' and 'source' — check for an "
+				+ "ExtractNewRecordState (unwrap) SMT on the connector, or schemas.enable=false on its converter.",
+				record.topic(), shape);
 	}
 
 	/**

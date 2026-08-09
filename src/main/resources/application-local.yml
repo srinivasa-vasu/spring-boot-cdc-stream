@@ -22,6 +22,10 @@ kafka:
   # Also the key under which applied offsets are stored in the sink. Two
   # deployments writing to the same sink must not share it.
   consumer-group: cdc-apply
+  # Distinguishes this instance from others in the same group. Only needed for
+  # multi-instance deployments with apply-origin-name set, and must be stable
+  # across restarts -- see application-cloud.yml for the full rationale.
+  # instance-id: "0"
   # Which topics depends entirely on transaction-scope below.
   #
   # global scope -> ONE funnelled topic on ONE partition, carrying every table
@@ -43,7 +47,8 @@ kafka:
   #   co-ordered.
   #
   # Set exactly one of topics / topic-pattern.
-  topic-pattern: "ybdb\\.public\\..*"
+#  topic-pattern: "ybdb\\.public\\..*"
+  topic-pattern: "ybdb\\.all"
   # topics:
   #   - ybdb.all
   max-poll-records: 500
@@ -95,3 +100,4 @@ consumer:
   # a topic offset has none of the slot-recreation hazards an LSN does.
   skip-applied-lsn: false
   ignore-origins: []
+  apply-origin-name: capa-1

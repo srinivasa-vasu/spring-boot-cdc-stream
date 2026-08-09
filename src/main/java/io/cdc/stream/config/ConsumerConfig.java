@@ -160,7 +160,7 @@ public class ConsumerConfig {
 	 * <p>
 	 * This is the <em>prefix</em> of the actual origin, not the origin itself:
 	 * {@link OriginNames} composes {@code <prefix>_<pipeline>_<lane>} so that the pipeline
-	 * identity disambiguates two deployments sharing a sink, and each apply lane gets its
+	 * identities disambiguate two deployments sharing a sink, and each apply lane gets its
 	 * own name. With a single lane the claimed origin is {@code <prefix>_<pipeline>_1}.
 	 *
 	 * <p>

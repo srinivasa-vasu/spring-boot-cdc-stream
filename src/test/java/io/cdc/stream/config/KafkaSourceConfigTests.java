@@ -5,6 +5,7 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Subscription is always by pattern, so an explicit topic list has to be translated into
@@ -49,6 +50,45 @@ class KafkaSourceConfigTests {
 		// Markers are meaningless under table scope, and consuming them is pure noise.
 		assertThat(pattern.matcher("ybdb.transaction").matches()).isFalse();
 		assertThat(pattern.matcher("__debezium-heartbeat.ybdb").matches()).isFalse();
+	}
+
+	@Test
+	void concurrencyIsCappedSoATypoCannotExhaustTheSink() {
+		KafkaSourceConfig config = new KafkaSourceConfig();
+		config.setTopics(List.of("ybdb.public.orders"));
+		config.setConcurrency(KafkaSourceConfig.MAX_CONCURRENCY + 1);
+
+		// Every lane is a standing cost: a held connection and a permanently registered
+		// replication origin. A mistyped 100 would quietly claim a hundred of each.
+		assertThatThrownBy(config::validate).isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("above the ceiling");
+	}
+
+	@Test
+	void concurrencyAtTheCeilingIsAllowed() {
+		KafkaSourceConfig config = new KafkaSourceConfig();
+		config.setTopics(List.of("ybdb.public.orders"));
+		config.setConcurrency(KafkaSourceConfig.MAX_CONCURRENCY);
+
+		config.validate();
+	}
+
+	@Test
+	void instanceIdMustBeSafeToInterpolateIntoInitSql() {
+		KafkaSourceConfig config = new KafkaSourceConfig();
+		config.setTopics(List.of("ybdb.public.orders"));
+		config.setInstanceId("pod'); DROP TABLE orders; --");
+
+		assertThatThrownBy(config::validate).isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("kafka.instance-id");
+	}
+
+	@Test
+	void anUnsetInstanceIdIsFineForASingleInstance() {
+		KafkaSourceConfig config = new KafkaSourceConfig();
+		config.setTopics(List.of("ybdb.public.orders"));
+
+		config.validate();
 	}
 
 	@Test

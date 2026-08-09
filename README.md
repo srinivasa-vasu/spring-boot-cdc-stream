@@ -185,13 +185,92 @@ describes independently advancing lanes. With more than one lane the LSN waterma
 written at all; the per-partition Kafka offsets carry restart state, and they are already
 keyed per partition so lanes never contend.
 
+`kafka.concurrency` bounds **threads, not topics** — subscribe to as many topics as you
+like, and their partitions are shared across the lanes. It is capped at 16, which is a
+backstop against a typo rather than a target: every lane holds a sink connection and
+registers a permanent replication origin, and lanes beyond the assigned partition count only
+idle. Match it to how much parallelism the sink can absorb, not to the table count.
+
 What you give up is cross-table ordering. Each table stays ordered within its partition, and
 that is what `table` scope already concedes.
 
-**Deployment.** With `concurrency: 1` a single partition means one consumer holds the
-assignment, so run `replicas: 1` with `strategy: Recreate` — a rolling update starts the new
-pod before the old one exits and the two fight over the replication origin. Scaling out is
-via lanes inside one instance, not more instances.
+**Deployment: use a StatefulSet, not a Deployment.** Two independent reasons, both about
+the replication origin:
+
+- **Stable identity.** `kafka.instance-id` becomes part of the origin name, and origins are
+  permanent catalog rows that nothing drops. A StatefulSet pod keeps its name across
+  restarts (`cdc-apply-0`); a Deployment pod gets a fresh random name each time, leaking an
+  origin family per restart.
+- **No overlap.** A StatefulSet's `RollingUpdate` terminates a pod before recreating the
+  same ordinal, so one origin is never claimed twice. A Deployment's `RollingUpdate` starts
+  the new pod first, and the two fight over the origin — which is why a Deployment would
+  need `strategy: Recreate`.
+
+Offsets are deliberately **not** keyed per instance — `cdc_kafka_offsets` uses
+`(consumer_group, topic, partition)`, because a partition moves between instances on a
+rebalance and its new owner must read where the previous one got to.
+
+### Kubernetes manifest
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cdc-apply
+spec:
+  serviceName: cdc-apply
+  # >1 only with consumer.transaction-scope=table. Global scope needs a single
+  # partition, so a second instance would sit idle holding an origin.
+  replicas: 2
+  podManagementPolicy: Parallel      # each ordinal has its own origin, so no ordering needed
+  selector:
+    matchLabels: { app: cdc-apply }
+  template:
+    metadata:
+      labels: { app: cdc-apply }
+    spec:
+      # consumer.drain-interval-ms is 30s; the K8s default grace period is also 30s,
+      # which leaves no room for the buffer to be discarded cleanly.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: cdc-apply
+          image: your-registry/cdc-apply:latest
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: cloud
+            # THE ONE THING THIS SECTION EXISTS FOR. Resolves to cdc-apply-0,
+            # cdc-apply-1, ... — stable for the life of the ordinal, which is what
+            # makes the derived origin name reusable across restarts.
+            - name: KAFKA_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka:9092
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: cdc-apply-sink, key: password }
+          # No actuator dependency yet, so this is a TCP probe on the web port.
+          # Add spring-boot-starter-actuator for a real /actuator/health check.
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 20
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+```
+
+`KAFKA_INSTANCE_ID` is the only variable this feature requires — everything else is ordinary
+Spring Boot relaxed binding (`KAFKA_BOOTSTRAP_SERVERS` → `kafka.bootstrap-servers`, and so
+on), so any property can be overridden the same way.
+
+Two things to size against the sink, since they are per pod and multiply by `replicas`:
+
+| | |
+|---|---|
+| Connections | `kafka.concurrency` apply lanes (one connection each) + `consumer.metadata-pool-size` (default 2) |
+| Replication origins | `kafka.concurrency` per pod, permanently registered, named `<prefix>_<group>_<instance>_<lane>` |
+
+So `replicas: 2` with `concurrency: 4` is 12 connections and 8 origins against the sink.
 
 ### Schema changes are not replicated
 
