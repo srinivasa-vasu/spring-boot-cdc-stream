@@ -1,9 +1,32 @@
 # spring-boot-cdc-stream
-[Spring Boot](https://spring.io/projects/spring-boot) and embedded [debezium](https://debezium.io/) based CDC solution for [postgres](https://www.postgresql.org/docs/) and [yugabytedb](https://docs.yugabyte.com/)
 
-Implementing CDC using Spring Boot, Debezium's embedded engine, and YugabyteDB offers a compelling strategy for real-time data synchronization without the complexities of a dedicated middleware like Kafka. This approach provides several key advantages, including simplicity in architecture and deployment, reduced operational overhead, direct integration of change events within the application logic, and the ability to leverage YugabyteDB's strong compatibility with PostgreSQL. The PostgreSQL compatibility of YugabyteDB plays a crucial role in making this approach accessible and efficient for a lot of tools to easily integrate with YugabyteDB if they already support PostgreSQL as a source or target. It is important to emphasize that while this middleware-less approach offers considerable benefits for specific use cases, the optimal choice of CDC strategy should always be driven by the particular requirements of the application. Factors such as the need for high scalability, robust fault tolerance, broad event distribution, and integration with a diverse range of external systems will influence whether this direct integration is the most suitable solution. However, for scenarios prioritizing simplicity, low latency, and reduced operational complexity, this combination presents a powerful and efficient way to achieve real-time data synchronization.
+A change-data-capture **sink** for YugabyteDB, built on Spring Boot and Kafka. It consumes
+Debezium change events from Kafka topics and applies them to a target YugabyteDB cluster.
 
-![cdc](assets/cdc.jpg)
+The source half runs in Kafka Connect. This application holds no source-side configuration
+at all — no replication slot, no publication, no Debezium offset store — and does one thing:
+turn change events back into rows, in order, transactionally.
+
+What it is careful about:
+
+- **Order is never re-derived.** Kafka preserves it per partition and the apply path never
+  reorders what it receives; batching only ever coalesces *adjacent* rows.
+- **You choose what commits together.** `consumer.transaction-scope` selects ordered batches,
+  one whole source transaction, or one transaction's changes to one table — the last being
+  the strongest guarantee ordinary per-table topics can support.
+- **The sink is the authority on progress.** Applied offsets are written *inside* the row
+  transaction, and the consumer seeks to them on assignment rather than trusting Kafka's
+  committed offset, which makes replay after a crash bounded and exact.
+- **Data only, never DDL.** The sink's schema is yours to migrate; the pipeline verifies
+  read-only that it can accept the rows and says precisely what is missing when it cannot.
+- **Bidirectional-safe.** Writes are tagged with a replication origin so a peer can tell this
+  pipeline's applies from real user writes and refuse to send them back.
+
+Parallel apply is available for table scope: each listener thread gets its own connection,
+transaction and replication origin.
+
+> An embedded-engine variant — Debezium in-process, no Kafka required — is on the
+> `feat/cdc-txn-apply` branch.
 
 ## Prerequisites
 - Java Development Kit (JDK) 21 or higher: [Download JDK](https://sdkman.io/jdks)
