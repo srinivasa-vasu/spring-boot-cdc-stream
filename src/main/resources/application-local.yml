@@ -71,15 +71,29 @@ consumer:
   # apply rolls it back too.
   apply-state-table: cdc_apply_state
   apply-state-schema: public
+  # What to do about a column the change events carry that the sink lacks.
+  # skipIfNull -> leave it out of the write while its value is null, and fail
+  #               naming the column and key on the first non-null one. A source
+  #               column added ahead of the sink migration is routine, and halting
+  #               everything over one that may never carry a value is a large
+  #               blast radius for nothing. Nothing is lost silently.
+  # fail       -> refuse to apply the table at all, before any row is written.
+  unknown-columns: skipIfNull
   # Records the commit LSN the sink has reached. Skipping on it is off because a
   # YugabyteDB slot's LSNs restart low when the slot is recreated, which would
   # make every new transaction look already-applied. Every statement is
   # idempotent, so replay is safe without it.
   skip-applied-lsn: false
-  # Replication origin names to discard, matched against source.origin on each
-  # event. This is loop prevention -- see README. Only matches if the writer tags
+  # Replication origin FAMILIES to discard, matched as PREFIXES against
+  # source.origin. This is loop prevention -- see README. Only matches if the writer tags
   # its transactions with pg_replication_origin_session_setup(); a plain JDBC
-  # write carries no origin at all.
+  # write carries no origin at all. Name the peer's family
+  # (<their-prefix>_<their-slot>) -- prefix matching means the filter survives
+  # the peer recreating its slot or adding lanes.
   ignore-origins: []
+  # PREFIX, not the literal origin: OriginNames composes
+  # <prefix>_<slot>_<lane>, so this claims 'atoc_<slot>_1'. Composing the slot in is
+  # what stops two pipelines reading different slots but writing to the same sink
+  # from both claiming one static name (the second dies with 55006).
   apply-origin-name: atoc
   ignore-replicated-changes: true

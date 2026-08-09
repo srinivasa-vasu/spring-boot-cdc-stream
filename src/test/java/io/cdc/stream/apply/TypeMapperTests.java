@@ -18,10 +18,6 @@ class TypeMapperTests {
 		Schema schema = SchemaBuilder.int64().name("io.debezium.time.MicroTimestamp").build();
 		TimeZone original = TimeZone.getDefault();
 		try {
-			// The old mapper built a java.sql.Timestamp from the Instant, which
-			// re-interpreted it in the local zone and shifted every timestamp written to
-			// a
-			// `timestamp without time zone` column.
 			TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"));
 			Object shifted = TypeMapper.value(schema, 1_700_000_000_123_456L);
 			TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
@@ -93,24 +89,17 @@ class TypeMapperTests {
 	@Test
 	@DisplayName("a sink column that is already wider needs no DDL and must not halt")
 	void widerSinkColumnIsAccepted() {
-		// Observed in practice: subtotal arrives as a double while the sink column is
-		// numeric. numeric stores it, so this is not a type change.
 		assertThat(TypeMapper.accommodates("numeric", "double precision")).isTrue();
 		assertThat(TypeMapper.accommodates("numeric(10,2)", "double precision")).isTrue();
-		// bigserial primary key receiving an integer-typed source column.
 		assertThat(TypeMapper.accommodates("bigserial", "integer")).isTrue();
 		assertThat(TypeMapper.accommodates("bigint", "smallint")).isTrue();
 		assertThat(TypeMapper.accommodates("text", "character varying")).isTrue();
 		assertThat(TypeMapper.accommodates("timestamptz", "timestamp")).isTrue();
 		assertThat(TypeMapper.accommodates("_int8", "bigint[]")).isTrue();
 
-		// A narrower sink cannot store the incoming type; that still needs widening.
 		assertThat(TypeMapper.accommodates("integer", "bigint")).isFalse();
 		assertThat(TypeMapper.canWiden("integer", "bigint")).isTrue();
-		// double precision deliberately refuses bigint: above 2^53 it would lose
-		// precision.
 		assertThat(TypeMapper.accommodates("double precision", "bigint")).isFalse();
-		// Genuinely incompatible, so the pipeline should still halt.
 		assertThat(TypeMapper.accommodates("integer", "text")).isFalse();
 		assertThat(TypeMapper.canWiden("integer", "text")).isFalse();
 	}

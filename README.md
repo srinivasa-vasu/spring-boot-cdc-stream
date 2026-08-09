@@ -127,7 +127,7 @@ can accept the rows, before any are written:
 | Checked | Why it is worth failing early |
 |---|---|
 | Table exists | otherwise `42P01`, from deep inside the first batch |
-| Every event column exists in the sink | otherwise a column silently absent from the write |
+| Every event column exists in the sink | see below — a warning by default, not a failure |
 | Sink column can store the incoming values | otherwise truncation or out-of-range, thousands of rows in |
 | A unique constraint matches the key columns | otherwise `42P10` — reported as a syntax-class error against SQL that is well formed |
 
@@ -137,6 +137,16 @@ do. A sink column that is deliberately *wider* than the source is fine and is no
 
 The check is not retryable — no amount of waiting adds a missing column — so it halts the
 pipeline with `UnrecoverableApplyException` rather than burning through the backoff.
+
+**A source column the sink lacks is handled per row, not per schema.** With
+`consumer.unknown-columns: skipIfNull` (the default) the column is left out of the write
+while its value is null, and the first non-null value stops the pipeline naming the column
+and the key. That is the distinction the schema-level check cannot make — it never sees a
+value, so on its own it could only assume the worst and halt everything over a column that
+may never carry anything. A source column added ahead of its sink migration is routine and
+temporary; losing data is not, so neither is tolerated silently. Set `unknown-columns: fail`
+to refuse the table outright instead. A missing **key** column stays fatal either way —
+there is nothing to target the row with.
 
 ### Adding a table to the capture set
 

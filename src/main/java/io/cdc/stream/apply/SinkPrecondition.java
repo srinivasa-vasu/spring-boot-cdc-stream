@@ -1,5 +1,7 @@
 package io.cdc.stream.apply;
 
+import io.cdc.stream.config.ConsumerConfig;
+
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -58,8 +60,22 @@ public class SinkPrecondition {
 	/** Fingerprint of the last schema verified per table, to skip the common case. */
 	private final Map<TableId, String> verified = new ConcurrentHashMap<>();
 
-	public SinkPrecondition(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate) {
+	/** The sink's real columns per table, so the applier can narrow rows onto them. */
+	private final Map<TableId, Set<String>> knownColumns = new ConcurrentHashMap<>();
+
+	private final ConsumerConfig config;
+
+	public SinkPrecondition(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate, ConsumerConfig config) {
 		this.jdbcTemplate = jdbcTemplate;
+		this.config = config;
+	}
+
+	/**
+	 * The sink's columns for a table, or null if it has not been verified yet — a truncate
+	 * carries no schema and so never is.
+	 */
+	Set<String> columnsOf(TableId table) {
+		return knownColumns.get(table);
 	}
 
 	/**
@@ -73,6 +89,7 @@ public class SinkPrecondition {
 			return;
 		}
 		Map<String, String> sink = sinkColumns(schema.table());
+		knownColumns.put(schema.table(), Set.copyOf(sink.keySet()));
 		if (sink.isEmpty()) {
 			throw new UnrecoverableApplyException(String.format(
 					"Sink table %s does not exist. This pipeline replicates data only and will not create it — "
@@ -117,10 +134,18 @@ public class SinkPrecondition {
 				.add(String.format("%s (sink '%s', source maps to '%s' — %s)", name, existing, column.sqlType(), remedy));
 		});
 		if (!missing.isEmpty()) {
-			throw new UnrecoverableApplyException(String.format(
-					"Sink table %s is missing column(s) %s that the change events carry. This pipeline replicates data "
-							+ "only and will not add them — migrate the sink and restart.",
-					schema.table(), missing));
+			if (config.getUnknownColumns() == ConsumerConfig.UnknownColumns.fail) {
+				throw new UnrecoverableApplyException(String.format(
+						"Sink table %s is missing column(s) %s that the change events carry, and "
+								+ "consumer.unknown-columns is 'fail'. Migrate the sink and restart, or use "
+								+ "'skipIfNull' to keep applying while their values are null.",
+						schema.table(), missing));
+			}
+			// Deliberately not fatal: whether this loses anything depends on the values,
+			// which only ColumnProjection can see, one row at a time.
+			log.warn("Sink table {} is missing column(s) {} that the change events carry. They will be left out of "
+					+ "writes while their values are null, and the first non-null value will stop the pipeline. "
+					+ "Migrate the sink to clear this.", schema.table(), missing);
 		}
 		if (!incompatible.isEmpty()) {
 			throw new UnrecoverableApplyException(String.format(
@@ -197,6 +222,7 @@ public class SinkPrecondition {
 	/** Forget cached state so the next event re-reads the sink. Used after a failure. */
 	void invalidate(TableId table) {
 		verified.remove(table);
+		knownColumns.remove(table);
 	}
 
 }

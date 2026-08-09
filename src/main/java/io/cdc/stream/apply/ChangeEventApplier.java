@@ -110,15 +110,39 @@ public class ChangeEventApplier {
 		// should fail before any of them is written.
 		distinctSchemas(rows).values().forEach(sinkPrecondition::verify);
 
-		String lastTxId = rows.getLast().txId();
+		// After verification, because it needs the sink's real columns. A source column the
+		// sink lacks is dropped when its value is null and fatal when it is not — the
+		// schema-level check cannot make that call, since it never sees a value.
+		List<ChangeRow> pending = project(rows);
+
+		String lastTxId = pending.getLast().txId();
 		transactionTemplate.executeWithoutResult(status -> {
-			applyRuns(rows);
+			applyRuns(pending);
 			if (watermark > 0) {
 				stateStore.record(lastTxId, watermark);
 			}
 		});
 		stateStore.committed(watermark);
-		return rows.size();
+		return pending.size();
+	}
+
+	/**
+	 * Narrows every row onto the columns the sink actually has. Returns the same list when
+	 * nothing needs narrowing, which is the common case.
+	 */
+	private List<ChangeRow> project(List<ChangeRow> rows) {
+		List<ChangeRow> projected = null;
+		for (int i = 0; i < rows.size(); i++) {
+			ChangeRow row = rows.get(i);
+			ChangeRow narrowed = ColumnProjection.project(row, sinkPrecondition.columnsOf(row.table()));
+			if (narrowed != row && projected == null) {
+				projected = new ArrayList<>(rows.subList(0, i));
+			}
+			if (projected != null) {
+				projected.add(narrowed);
+			}
+		}
+		return projected == null ? rows : projected;
 	}
 
 	private long highestRowLsn(List<ChangeRow> rows) {

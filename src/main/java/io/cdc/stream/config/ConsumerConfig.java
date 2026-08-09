@@ -111,8 +111,13 @@ public class ConsumerConfig {
 	 * <p>
 	 * For this to match anything the writer has to tag its transactions, via
 	 * {@code pg_replication_origin_session_setup(...)} on its session. A plain JDBC write
-	 * carries no origin at all and is indistinguishable from an ordinary application
-	 * write.
+	 * carries no origin at all and is indistinguishable from an ordinary application write.
+	 *
+	 * <p>
+	 * Entries match as <em>prefixes</em>. A peer's origins are a family — see
+	 * {@link OriginNames} — whose trailing components change when its slot is recreated or
+	 * lanes are added, neither of which it would consult you about. Name the family
+	 * ({@code <their-prefix>_<their-slot>}) once and the filter survives both.
 	 */
 	private Set<String> ignoreOrigins = new LinkedHashSet<>();
 
@@ -146,11 +151,45 @@ public class ConsumerConfig {
 	 * changes worth replicating, and tagging them would cause the peer to discard them.
 	 *
 	 * <p>
-	 * Set against the sink ({@code spring.datasource}), since the origin is session state
-	 * on the writer. Requires {@code spring.datasource.hikari.maximum-pool-size=1},
-	 * because an origin can only be active in one session at a time.
+	 * This is a <em>prefix</em>, not the origin itself: {@link OriginNames} composes
+	 * {@code <prefix>_<slot>_<lane>} so that two pipelines reading different slots but
+	 * writing to one sink cannot collide on a single static name.
+	 *
+	 * <p>
+	 * Set against the sink ({@code spring.datasource}), since the origin is session state on
+	 * the writer. Requires {@code spring.datasource.hikari.maximum-pool-size=1}, because an
+	 * origin can only be active in one session at a time.
 	 */
 	private String applyOriginName;
+
+	/**
+	 * What to do about a column the change events carry that the sink does not have.
+	 *
+	 * <p>
+	 * {@code skipIfNull} — the default — leaves the column out of the write when its value
+	 * is null, and fails naming the column and key when it is not. This is the operable
+	 * choice: a source column added ahead of the sink migration is a routine, temporary
+	 * state, and halting the entire pipeline over one that may never carry a value is a
+	 * large blast radius for nothing. Nothing is lost silently, because the decision is made
+	 * per row against the actual value.
+	 *
+	 * <p>
+	 * {@code fail} restores the stricter behaviour: refuse to start applying a table whose
+	 * events carry any column the sink lacks, before a single row is written. Use it when
+	 * the sink is expected to be exactly in step with the source and you would rather find
+	 * out at startup.
+	 */
+	private UnknownColumns unknownColumns = UnknownColumns.skipIfNull;
+
+	/** See {@link #unknownColumns}. */
+	public enum UnknownColumns {
+
+		/** Omit the column when its value is null; fail when it is not. */
+		skipIfNull,
+		/** Refuse to apply the table at all. */
+		fail
+
+	}
 
 	/**
 	 * Size of the secondary pool used for the sink precondition check —

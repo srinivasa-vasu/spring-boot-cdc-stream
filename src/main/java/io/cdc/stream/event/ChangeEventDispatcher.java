@@ -96,9 +96,9 @@ public class ChangeEventDispatcher {
 			log.info("Loop prevention: discarding changes from replication origin(s) {}", config.getIgnoreOrigins());
 		}
 		else if (config.getApplyOriginName() != null && !config.getApplyOriginName().isBlank()) {
-			log.warn("Writes are tagged with origin '{}' but no origin filter is configured. In a bidirectional "
-					+ "topology set consumer.ignore-replicated-changes=true, or this pipeline will replay its "
-					+ "peer's applies back to it.", config.getApplyOriginName());
+			log.warn("Writes are tagged with a replication origin derived from '{}' but no origin filter is "
+					+ "configured. In a bidirectional topology set consumer.ignore-replicated-changes=true, or this "
+					+ "pipeline will replay its peer's applies back to it.", config.getApplyOriginName());
 		}
 	}
 
@@ -154,8 +154,7 @@ public class ChangeEventDispatcher {
 			log.info("First change event carrying replication origin '{}' seen on {} — origin propagation from the "
 					+ "writer through the WAL to this consumer is working", row.origin(), row.table());
 		}
-		if (row.origin() != null
-				&& (config.isIgnoreReplicatedChanges() || config.getIgnoreOrigins().contains(row.origin()))) {
+		if (row.origin() != null && (config.isIgnoreReplicatedChanges() || isIgnoredOrigin(row.origin()))) {
 			// Our own write, streamed back to us. Discarding it is what breaks the loop.
 			// Safe to do per row: the origin is recorded per transaction, so either every
 			// row of a transaction is filtered or none is.
@@ -170,6 +169,26 @@ public class ChangeEventDispatcher {
 		if (shouldFlush(row)) {
 			flush(committer);
 		}
+	}
+
+	/**
+	 * Matches an incoming origin against {@code consumer.ignore-origins} as a
+	 * <em>prefix</em>, not an exact string.
+	 *
+	 * <p>
+	 * A peer's origins are a family — {@code <prefix>_<slot>_<lane>} — and both trailing
+	 * components move without the peer being consulted. Recreating a slot is a documented
+	 * operation here, and lanes would arrive with parallel apply. Exact matching would mean
+	 * every such change silently stops the filter working, which in a bidirectional topology
+	 * means an apply loop rather than an error. Naming the family once covers all of it.
+	 */
+	private boolean isIgnoredOrigin(String origin) {
+		for (String ignored : config.getIgnoreOrigins()) {
+			if (origin.equals(ignored) || origin.startsWith(ignored + '_')) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
