@@ -181,6 +181,23 @@ public class ConsumerConfig {
 	 */
 	private UnknownColumns unknownColumns = UnknownColumns.skipIfNull;
 
+	/**
+	 * How long a sink shape stays cached once it is known to be missing columns.
+	 *
+	 * <p>
+	 * Verification is normally keyed on the schema fingerprint, which describes the
+	 * <em>source</em>. That is the right key for detecting source DDL — it is the only
+	 * signal available, since logical decoding emits none — but it says nothing about the
+	 * sink. So when the fix is a sink migration, the fingerprint never changes, the cached
+	 * result never expires, and the pipeline keeps dropping a column that now exists until
+	 * it is restarted. Someone does exactly the right thing and nothing happens.
+	 *
+	 * <p>
+	 * This bounds that window. It applies <em>only</em> while a table is known to be missing
+	 * columns; a healthy table is still verified once per schema shape and costs nothing.
+	 */
+	private int sinkRecheckIntervalMs = 30_000;
+
 	/** See {@link #unknownColumns}. */
 	public enum UnknownColumns {
 
@@ -200,13 +217,14 @@ public class ConsumerConfig {
 	private int metadataPoolSize = 2;
 
 	@PostConstruct
-	void validate() {
+	public void validate() {
 		isTrue(batchSize > 0 && batchSize <= 10000, "consumer.batch-size must be between 1 and 10000");
 		isTrue(flushIntervalMs > 50, "consumer.flush-interval-ms must be greater than 50");
 		isTrue(drainIntervalMs <= 180000, "consumer.drain-interval-ms must be less than or equal to 180000");
 		isTrue(transactionsPerCommit > 0, "consumer.transactions-per-commit must be greater than 0");
 		isTrue(maxBufferedRows >= batchSize, "consumer.max-buffered-rows must be greater than consumer.batch-size");
 		isTrue(metadataPoolSize >= 1, "consumer.metadata-pool-size must be at least 1");
+		isTrue(sinkRecheckIntervalMs > 0, "consumer.sink-recheck-interval-ms must be greater than 0");
 	}
 
 }

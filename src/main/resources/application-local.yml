@@ -79,6 +79,12 @@ consumer:
   #               blast radius for nothing. Nothing is lost silently.
   # fail       -> refuse to apply the table at all, before any row is written.
   unknown-columns: skipIfNull
+  # How long a sink shape stays cached once it is known to be missing columns.
+  # Verification is normally keyed on the schema fingerprint, which describes the
+  # SOURCE -- so when the fix is a sink migration the fingerprint never changes and
+  # the cached result would never expire. This bounds that window, and applies only
+  # while a table is degraded; a healthy table still costs one check per schema.
+  sink-recheck-interval-ms: 30000
   # Records the commit LSN the sink has reached. Skipping on it is off because a
   # YugabyteDB slot's LSNs restart low when the slot is recreated, which would
   # make every new transaction look already-applied. Every statement is

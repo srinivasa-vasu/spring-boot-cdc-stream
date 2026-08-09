@@ -148,6 +148,13 @@ temporary; losing data is not, so neither is tolerated silently. Set `unknown-co
 to refuse the table outright instead. A missing **key** column stays fatal either way —
 there is nothing to target the row with.
 
+Migrating the sink clears it **without a restart**. That needs saying because it doesn't
+follow from how verification is cached: results are keyed on the schema fingerprint, which
+describes the *source*, so a sink migration changes nothing the cache can see. While a table
+is known to be missing columns it is therefore re-checked every
+`consumer.sink-recheck-interval-ms` (30s), and logs when it catches up. A healthy table is
+unaffected — still one check per schema shape.
+
 ### Adding a table to the capture set
 
 Only **streaming** works for a table added later. An existing slot will start delivering
