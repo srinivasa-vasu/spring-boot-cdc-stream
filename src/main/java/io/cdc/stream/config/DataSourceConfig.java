@@ -195,8 +195,6 @@ public class DataSourceConfig {
 								+ "distinct value.",
 						origin), e);
 			}
-			// Anything else is not this check's business; the pool will report it in
-			// context if it matters.
 			log.debug("Could not pre-check replication origin '{}'; leaving it to the pool", origin, e);
 		}
 	}
