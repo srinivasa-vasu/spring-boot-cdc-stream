@@ -168,7 +168,7 @@ public class ConsumerConfig {
 	 * on the writer. Requires {@code spring.datasource.hikari.maximum-pool-size=1}, because
 	 * an origin can only be active in one session at a time.
 	 */
-	private String applyOriginName;
+	private String applyOriginNamePrefix;
 
 	/**
 	 * What to do about a column the change events carry that the sink does not have.

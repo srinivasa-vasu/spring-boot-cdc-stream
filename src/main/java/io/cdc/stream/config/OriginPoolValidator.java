@@ -52,7 +52,7 @@ public class OriginPoolValidator {
 
 	@PostConstruct
 	void validate() {
-		String origin = config.getApplyOriginName();
+		String origin = config.getApplyOriginNamePrefix();
 		if (origin == null || origin.isBlank() || !(dataSource instanceof HikariDataSource hikari)) {
 			return;
 		}

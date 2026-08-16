@@ -60,9 +60,6 @@ kafka:
   # Worst-case delay before a topic newly matching topic-pattern is discovered.
   # Discovery triggers a rebalance, so do not set this very low.
   metadata-max-age-ms: 300000
-  # Must stay 1 while consumer.apply-origin-name is set: the apply pool is
-  # pinned to one connection to hold the replication origin, so extra listener
-  # threads would only contend for it. Validated at startup.
   concurrency: 1
   # Seek to what the sink durably applied rather than to Kafka's committed
   # offset. The sink offset is written inside the row transaction, so it cannot
@@ -117,4 +114,4 @@ consumer:
   # a topic offset has none of the slot-recreation hazards an LSN does.
   skip-applied-lsn: false
   ignore-origins: []
-  apply-origin-name: capa-1
+  apply-origin-name-prefix: capa-1

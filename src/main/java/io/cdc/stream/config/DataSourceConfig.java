@@ -72,7 +72,7 @@ public class DataSourceConfig {
 		HikariDataSource dataSource = properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
 		dataSource.setPoolName("cdc-apply");
 
-		String prefix = config.getApplyOriginName();
+		String prefix = config.getApplyOriginNamePrefix();
 		if (prefix == null || prefix.isBlank()) {
 			log.info("consumer.apply-origin-name is not set, so writes are not tagged with a replication origin. "
 					+ "Bidirectional replication needs it, or the peer cannot distinguish this pipeline's applies "
@@ -218,7 +218,7 @@ public class DataSourceConfig {
 	public ApplyLanes applyLanes(DataSourceProperties properties, @Qualifier("dataSource") HikariDataSource primary,
 			PlatformTransactionManager transactionManager, ConsumerConfig config, KafkaSourceConfig kafkaConfig,
 			PipelineIdentity identity) {
-		String prefix = config.getApplyOriginName();
+		String prefix = config.getApplyOriginNamePrefix();
 		boolean tagged = prefix != null && !prefix.isBlank();
 		List<ApplyLane> lanes = new ArrayList<>();
 		List<HikariDataSource> owned = new ArrayList<>();
