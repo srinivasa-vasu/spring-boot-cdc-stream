@@ -1,6 +1,7 @@
 package io.cdc.stream.apply;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import io.cdc.stream.config.ConsumerConfig;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -39,7 +40,21 @@ public class ConflictLog {
 
 	private final ConsumerConfig config;
 
-	private final ObjectMapper objectMapper;
+	/**
+	 * Owned rather than injected.
+	 *
+	 * <p>
+	 * Spring Boot 4 auto-configures a <em>Jackson 3</em> {@code tools.jackson.databind}
+	 * mapper, so asking the context for the Jackson 2 type this serialises with finds no
+	 * bean at all. Beyond that, the context's mapper is configured for HTTP payloads and can
+	 * be customised by anything in the application — neither is a sensible dependency for an
+	 * audit record that should serialise the same way for the life of the table. A private
+	 * mapper also keeps this working in a deployment that drops the web starter entirely.
+	 */
+	private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules()
+		// ISO-8601 rather than epoch numbers: these rows are read by people reconciling a
+		// conflict, and a timestamp is the field they will be comparing.
+		.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
 	private final TableId table;
 
@@ -47,9 +62,8 @@ public class ConflictLog {
 
 	private final AtomicLong recorded = new AtomicLong();
 
-	public ConflictLog(ConsumerConfig config, ObjectMapper objectMapper) {
+	public ConflictLog(ConsumerConfig config) {
 		this.config = config;
-		this.objectMapper = objectMapper;
 		this.table = new TableId(config.getApplyStateSchema(), config.getConflictLogTable());
 	}
 
