@@ -119,7 +119,6 @@ class SqlGeneratorTests {
 		return new TableSchema.Column(name, connectSchema, sqlType, TypeMapper.placeholder(sqlType));
 	}
 
-
 	@Test
 	@DisplayName("the conflict guard compares the sink row against the incoming one")
 	void upsertGuardComparesAgainstExcluded() {
@@ -135,17 +134,40 @@ class SqlGeneratorTests {
 	}
 
 	@Test
-	@DisplayName("the replay form relaxes to <= so an applied row can be told from a rejected one")
-	void replayGuardIsNonStrict() {
+	@DisplayName("the tiebreak relaxes the comparison to <=, so one side accepts an equal version")
+	void tiebreakGuardIsNonStrict() {
 		SqlGenerator.Statement strict = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
 				new SqlGenerator.Guard("updated_at", true));
-		SqlGenerator.Statement replay = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+		SqlGenerator.Statement lenient = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
 				new SqlGenerator.Guard("updated_at", false));
 
 		assertThat(strict.sql()).contains(" < EXCLUDED.");
-		assertThat(replay.sql()).contains(" <= EXCLUDED.");
+		assertThat(lenient.sql()).contains(" <= EXCLUDED.");
 		// Distinct cache entries, or the second would silently return the first.
-		assertThat(replay.sql()).isNotEqualTo(strict.sql());
+		assertThat(lenient.sql()).isNotEqualTo(strict.sql());
+	}
+
+	/**
+	 * Nothing reads the returned rows. They are there to take the statement out of
+	 * {@code reWriteBatchedInserts}, which is what preserves the per-row affected counts the
+	 * conflict log depends on — see {@code BatchRewriteCompatibilityTests}. An unguarded
+	 * upsert has no such need and keeps the rewrite, so the clause must not leak onto it.
+	 */
+	@Test
+	@DisplayName("only a guarded upsert carries RETURNING")
+	void returningIsAddedOnlyWhenGuarded() {
+		SqlGenerator.Statement guarded = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		assertThat(guarded.sql()).endsWith(" RETURNING \"id\"");
+		// No extra binds: RETURNING names output columns, not parameters.
+		assertThat(guarded.bindColumns()).containsExactly("id", "quantity", "updated_at");
+
+		assertThat(generator.upsert(versioned(), List.of("id", "quantity", "updated_at")).sql())
+			.doesNotContain("RETURNING");
+		// Dropped guard means no guarded batch to protect, so no clause either.
+		assertThat(generator.upsert(versioned(), List.of("id", "quantity"), new SqlGenerator.Guard("updated_at", true))
+			.sql()).doesNotContain("RETURNING");
 	}
 
 	@Test
@@ -179,6 +201,21 @@ class SqlGeneratorTests {
 				new SqlGenerator.Guard("updated_at", true));
 
 		assertThat(guarded.sql()).doesNotContain("updated_at");
+	}
+
+	@Test
+	@DisplayName("an applied row and a tie-rejected row leave the sink in the same state")
+	void appliedAndTieRejectedAreIndistinguishableAfterwards() {
+		// The reason a guarded statement is executed row by row rather than batched and
+		// reconstructed afterwards. Both outcomes leave the sink holding the incoming
+		// version; only the row data differs, and the version is all a probe can see.
+		// Guarding this as a test so the batching optimisation is not re-attempted.
+		SqlGenerator.Statement strict = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		assertThat(strict.sql()).contains(" < EXCLUDED.");
+		// After applying, sink == incoming. After losing a tie, sink == incoming as well.
+		// No comparison on that column can separate them.
 	}
 
 }

@@ -46,6 +46,39 @@ class BatchRewriteCompatibilityTests {
 	}
 
 	/**
+	 * A guarded upsert must NOT be rewrite-eligible, and its {@code RETURNING} clause is
+	 * what makes it so.
+	 *
+	 * <p>
+	 * The rewrite would collapse the batch and report {@code SUCCESS_NO_INFO} instead of
+	 * per-row counts, which is the only signal that says which changes the guard refused —
+	 * the outcome cannot be reconstructed afterwards, since an applied row and a row that
+	 * lost a tie both leave the sink holding the incoming version. Losing this would not
+	 * break the apply; it would quietly make the conflict log wrong, which is worse.
+	 *
+	 * <p>
+	 * The second assertion is the interesting one: strip the {@code RETURNING} and the same
+	 * statement becomes eligible again. So the guard itself buys no exemption, and a change
+	 * that drops the clause as redundant — nothing reads those rows — silently reintroduces
+	 * the bug.
+	 */
+	@Test
+	@DisplayName("a guarded upsert opts out of the rewrite, via RETURNING")
+	void guardedUpsertOptsOutOfTheRewrite() throws Exception {
+		String guarded = generator
+			.upsert(schema(), List.of("id", "quantity", "note"), new SqlGenerator.Guard("quantity", true))
+			.sql();
+
+		assertThat(guarded).contains(" RETURNING \"id\"");
+		assertThat(rewritable(guarded)).describedAs("guarded upsert must not be rewritten: %s", guarded).isFalse();
+
+		String withoutReturning = guarded.substring(0, guarded.indexOf(" RETURNING "));
+		assertThat(rewritable(withoutReturning))
+			.describedAs("RETURNING, not the guard, is what defeats the rewrite: %s", withoutReturning)
+			.isEqualTo(REWRITES_ON_CONFLICT);
+	}
+
+	/**
 	 * The bundled driver <em>does</em> rewrite {@code INSERT ... ON CONFLICT DO UPDATE}
 	 * into a single multi-row statement. Two consequences, and this test exists to pin
 	 * both:
@@ -60,6 +93,25 @@ class BatchRewriteCompatibilityTests {
 	 * revisiting.
 	 */
 	private static final boolean REWRITES_ON_CONFLICT = true;
+
+	/**
+	 * The general rule the guarded upsert relies on, pinned independently of our own SQL:
+	 * {@code RETURNING} makes any insert ineligible, because the driver must deliver
+	 * per-statement results and so cannot fold the batch into one command.
+	 *
+	 * <p>
+	 * Batching a statement that returns rows is safe under {@code executeBatch} —
+	 * {@code BatchResultHandler.handleResultRows} discards them unless generated keys were
+	 * requested — but NOT under {@code executeUpdate}, which calls
+	 * {@code checkNoResultUpdate} and throws. That asymmetry is why
+	 * {@code ChangeEventApplier} batches even a single row.
+	 */
+	@Test
+	@DisplayName("RETURNING makes a plain insert ineligible for the rewrite")
+	void returningDefeatsTheRewrite() throws Exception {
+		assertThat(rewritable("INSERT INTO \"public\".\"orders\" (\"id\") VALUES (?)")).isTrue();
+		assertThat(rewritable("INSERT INTO \"public\".\"orders\" (\"id\") VALUES (?) RETURNING \"id\"")).isFalse();
+	}
 
 	private static boolean rewritable(String sql) throws Exception {
 		List<NativeQuery> queries = Parser.parseJdbcSql(sql, true, true, false, true, true);

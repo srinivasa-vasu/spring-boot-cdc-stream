@@ -301,14 +301,11 @@ public class ChangeEventApplier {
 
 	private void execute(SqlGenerator.Statement statement, List<ChangeRow> run) {
 		try {
-			if (run.size() == 1) {
-				ChangeRow row = run.getFirst();
-				int affected = jdbcTemplate.update(statement.sql(), ps -> bind(ps, statement, row));
-				if (affected == 0) {
-					classify(row);
-				}
-				return;
-			}
+			// Always a batch, even for a single row. A guarded statement carries a RETURNING
+			// clause, and the driver rejects a result-returning statement under executeUpdate
+			// ("A result was returned when none was expected") while silently discarding the
+			// rows under executeBatch. Routing everything through the batch path keeps that
+			// difference from becoming a size-dependent failure.
 			int[] counts = jdbcTemplate.batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
 				@Override
 				public void setValues(@NonNull PreparedStatement ps, int i) throws SQLException {
@@ -320,9 +317,7 @@ public class ChangeEventApplier {
 					return run.size();
 				}
 			});
-			if (!allApplied(counts, run.size())) {
-				findLosers(run);
-			}
+			findLosers(run, counts);
 		}
 		catch (RuntimeException e) {
 			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.getFirst().op(),
@@ -332,80 +327,23 @@ public class ChangeEventApplier {
 	}
 
 	/**
-	 * Whether the batch accounted for every row.
+	 * Reports the rows of a batch that applied to nothing.
 	 *
 	 * <p>
-	 * Returns false when any count is {@code SUCCESS_NO_INFO} as well as when the total
-	 * falls short. With {@code reWriteBatchedInserts} the driver collapses a batch into one
-	 * multi-row statement and reports no per-row counts at all, so "cannot tell" has to be
-	 * treated the same as "something was rejected" — the alternative is missing losers
-	 * silently, which is the whole failure this exists to prevent.
+	 * The per-row counts are trustworthy for every statement that could report a genuine
+	 * zero. Updates and deletes are never rewritten. Guarded upserts opt out of the rewrite
+	 * through their {@code RETURNING} clause, precisely so this signal survives. What is
+	 * left — an unguarded upsert — is the one case {@code reWriteBatchedInserts} may
+	 * collapse into {@code SUCCESS_NO_INFO}, and it cannot affect zero rows anyway: with no
+	 * guard to refuse it, it would have inserted. So a rewritten batch is exactly the batch
+	 * with nothing to find, and the loop skips {@code SUCCESS_NO_INFO} rather than probing.
 	 */
-	private static boolean allApplied(int[] counts, int expected) {
-		int accounted = 0;
-		for (int count : counts) {
-			if (count < 0) {
-				return false;
-			}
-			accounted += count;
-		}
-		return accounted >= expected;
-	}
-
-	/**
-	 * Second phase: work out which rows of the batch applied to nothing.
-	 *
-	 * <p>
-	 * Deliberately a <em>read-only</em> probe rather than re-running the statement. Replaying
-	 * with a relaxed comparison would tell an applied row from a rejected one, but it would
-	 * also re-apply any row that lost a tie — silently undoing the decision the tiebreak had
-	 * just made. A probe cannot change the outcome it is measuring.
-	 *
-	 * <p>
-	 * Only reached when the batch could not account for every row, so the common case pays
-	 * nothing.
-	 */
-	private void findLosers(List<ChangeRow> run) {
-		for (ChangeRow row : run) {
-			if (row.schema() != null && row.schema().hasKey() && !wasApplied(row)) {
-				classify(row);
+	private void findLosers(List<ChangeRow> run, int[] counts) {
+		for (int i = 0; i < counts.length && i < run.size(); i++) {
+			if (counts[i] == 0) {
+				classify(run.get(i));
 			}
 		}
-	}
-
-	/**
-	 * Asks the sink whether the guard would accept this change, in one statement.
-	 *
-	 * <p>
-	 * Evaluated in SQL with the same comparison the apply used, so it needs no type handling
-	 * of its own — a timestamp read back through JDBC and one converted from the change event
-	 * are not the same Java type, and comparing them here would be a quiet source of wrong
-	 * answers.
-	 * @return false when the row is absent or the guard would refuse, which are the two ways
-	 * a change applies to nothing
-	 */
-	private boolean wasApplied(ChangeRow row) {
-		SqlGenerator.Guard guard = guardFor(row);
-		List<String> keys = row.schema().keyColumns();
-		StringBuilder sql = new StringBuilder("SELECT ");
-		List<Object> args = new ArrayList<>();
-		if (guard == null || !row.values().containsKey(guard.column())) {
-			sql.append("true");
-		}
-		else {
-			sql.append(TableId.quote(guard.column())).append(guard.comparison()).append('?');
-			args.add(row.values().get(guard.column()));
-		}
-		sql.append(" FROM ").append(row.table().qualified()).append(" WHERE ");
-		for (int i = 0; i < keys.size(); i++) {
-			sql.append(i == 0 ? "" : " AND ").append(TableId.quote(keys.get(i))).append(" = ?");
-			args.add(row.values().get(keys.get(i)));
-		}
-		Boolean accepted = jdbcTemplate.query(sql.toString(),
-				rs -> rs.next() ? rs.getBoolean(1) : null, args.toArray());
-		// Absent row: a delete succeeded, or an update had nothing to act on. Either way it
-		// did not apply, and classify() decides which of those it was.
-		return Boolean.TRUE.equals(accepted);
 	}
 
 	/**
