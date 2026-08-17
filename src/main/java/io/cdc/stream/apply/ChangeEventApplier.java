@@ -314,20 +314,11 @@ public class ChangeEventApplier {
 
 	private void execute(ApplyLane lane, SqlGenerator.Statement statement, List<ChangeRow> run) {
 		try {
-			// A guarded statement is executed row by row. Whether the guard accepted a
-			// change cannot be recovered afterwards: an applied row and a row that lost a
-			// tie both leave the sink holding the incoming version, differing only in the
-			// data. And with reWriteBatchedInserts the driver collapses a batch and reports
-			// no per-row counts at all. Per-row execution makes the affected count
-			// authoritative, which is the only way the conflict log can be trusted.
-			if (run.size() == 1 || guarded(run.getFirst())) {
-				for (ChangeRow row : run) {
-					if (lane.jdbcTemplate().update(statement.sql(), ps -> bind(ps, statement, row)) == 0) {
-						classify(lane, row);
-					}
-				}
-				return;
-			}
+			// Always a batch, even for a single row. A guarded statement carries a RETURNING
+			// clause, and the driver rejects a result-returning statement under executeUpdate
+			// ("A result was returned when none was expected") while silently discarding the
+			// rows under executeBatch. Routing everything through the batch path keeps that
+			// difference from becoming a size-dependent failure.
 			int[] counts = lane.jdbcTemplate().batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
 				@Override
 				public void setValues(@NonNull PreparedStatement ps, int i) throws SQLException {
@@ -348,20 +339,17 @@ public class ChangeEventApplier {
 		}
 	}
 
-	/** Whether this table applies changes under a last-writer-wins guard. */
-	private boolean guarded(ChangeRow row) {
-		return guardFor(row) != null;
-	}
-
 	/**
-	 * Reports the rows of an unguarded batch that applied to nothing.
+	 * Reports the rows of a batch that applied to nothing.
 	 *
 	 * <p>
-	 * Driven by the per-row counts, which are trustworthy here precisely because the
-	 * statement is unguarded: {@code reWriteBatchedInserts} rewrites inserts only, so an
-	 * update or a delete comes back with real counts, and an unguarded upsert cannot affect
-	 * zero rows in the first place — it would have inserted. Where the driver does report
-	 * {@code SUCCESS_NO_INFO} there is nothing to find, so nothing is probed.
+	 * The per-row counts are trustworthy for every statement that could report a genuine
+	 * zero. Updates and deletes are never rewritten. Guarded upserts opt out of the rewrite
+	 * through their {@code RETURNING} clause, precisely so this signal survives. What is
+	 * left — an unguarded upsert — is the one case {@code reWriteBatchedInserts} may
+	 * collapse into {@code SUCCESS_NO_INFO}, and it cannot affect zero rows anyway: with no
+	 * guard to refuse it, it would have inserted. So a rewritten batch is exactly the batch
+	 * with nothing to find, and the loop skips {@code SUCCESS_NO_INFO} rather than probing.
 	 */
 	private void findLosers(ApplyLane lane, List<ChangeRow> run, int[] counts) {
 		for (int i = 0; i < counts.length && i < run.size(); i++) {

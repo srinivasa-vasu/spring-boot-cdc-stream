@@ -29,12 +29,13 @@ public class SqlGenerator {
 	 * change, compared on a column both already carry.
 	 *
 	 * @param column the sink's version column — see {@code SinkPrecondition.conflictColumnOf}
-	 * @param strict {@code true} compares {@code <}, which is the normal apply; {@code false}
-	 * compares {@code <=}, used only by the two-phase replay. After a batch, a row that was
-	 * applied has a sink version <em>equal</em> to the incoming one and a row that was
-	 * rejected has a greater one — indistinguishable under {@code <}, since both yield zero
-	 * affected rows. Re-running the loser hunt with {@code <=} separates them: the applied
-	 * row re-applies identical values, the rejected row still refuses.
+	 * @param strict how an equal version is settled, which is the whole of the tiebreak.
+	 * {@code true} compares {@code <} and rejects a tie; {@code false} compares {@code <=}
+	 * and accepts it. Both deployments in a pair derive this from the same rule and reach
+	 * opposite answers, so exactly one accepts a given tie and the two converge — see
+	 * {@code ConsumerConfig.incomingWinsTies}. Leaving ties to one setting on both sides
+	 * diverges either way round: reject-both keeps two different values, accept-both swaps
+	 * them.
 	 */
 	public record Guard(String column, boolean strict) {
 
@@ -87,6 +88,21 @@ public class SqlGenerator {
 						.append(effective.comparison())
 						.append("EXCLUDED.")
 						.append(column);
+
+					// Nothing reads these rows. RETURNING is here because it makes the
+					// statement ineligible for reWriteBatchedInserts, and a batch that is not
+					// rewritten reports real per-row affected counts instead of
+					// SUCCESS_NO_INFO. Those counts are the only trustworthy signal of which
+					// changes the guard refused: once the batch has run, an applied row and a
+					// row that lost a tie both leave the sink holding the incoming version,
+					// so no later query can tell them apart. Guarded writes would otherwise
+					// have to run one statement at a time to stay honest.
+					//
+					// Safe to batch a statement that returns rows: the driver discards result
+					// rows in executeBatch unless generated keys were asked for. It is NOT
+					// safe under executeUpdate, which rejects them outright — see
+					// ChangeEventApplier.execute.
+					sql.append(" RETURNING ").append(joinQuoted(schema.keyColumns()));
 				}
 			}
 			return new Statement(sql.toString(), insertColumns);

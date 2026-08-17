@@ -420,14 +420,23 @@ Two reasons are recorded. `stale` means the guard refused it; `row_missing` mean
 row to update, which was previously only a log line. An upsert can never be `row_missing` — it
 would have inserted — so that case is decided without a probe.
 
-Finding the rejected rows inside a JDBC batch takes a second pass, and only when the batch
-could not account for every row. With `reWriteBatchedInserts` the driver collapses a batch into
-one statement and reports no per-row counts, so "cannot tell" is treated the same as "something
-was rejected" — the alternative is losing losers silently. The second pass is a **read-only**
-probe rather than a re-run: replaying a row that lost a tie would re-apply it and undo the
-decision, so the measurement must not be able to change the outcome. The probe evaluates the
-comparison in SQL, because a timestamp read back through JDBC and one converted from a change
-event are not the same Java type.
+Rejections are identified from the JDBC batch's per-row affected counts, which is exact rather
+than inferred. That takes one deliberate concession: a guarded upsert is generated with a
+`RETURNING` clause whose rows nobody reads. Its purpose is to make the statement ineligible for
+`reWriteBatchedInserts`, because a rewritten batch collapses into a single statement and reports
+`SUCCESS_NO_INFO` instead of counts. Guarded tables therefore give up the multi-row-insert
+optimisation — but they keep the batch, so it is still one round trip, not one per row.
+
+The alternative of reading the sink afterwards does not work, and the reason is worth stating
+because it looks like it should. Once the batch has run, a row that applied and a row that lost
+a tie **both** leave the sink holding the incoming version; they differ only in data the
+comparison never sees. There is no query that separates them, so the decision has to be captured
+at apply time or not at all.
+
+Only the two ambiguous cases still probe: a partial update or a delete that affected nothing may
+have been refused by the guard or may have had no row to act on. That probe is **read-only** —
+replaying a row that lost a tie would re-apply it and undo the decision, so the measurement must
+not be able to change the outcome.
 
 #### What you are assuming
 
