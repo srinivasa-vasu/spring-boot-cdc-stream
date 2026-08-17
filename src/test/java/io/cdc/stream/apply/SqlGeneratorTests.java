@@ -181,4 +181,20 @@ class SqlGeneratorTests {
 		assertThat(guarded.sql()).doesNotContain("updated_at");
 	}
 
+
+	@Test
+	@DisplayName("an applied row and a tie-rejected row leave the sink in the same state")
+	void appliedAndTieRejectedAreIndistinguishableAfterwards() {
+		// The reason a guarded statement is executed row by row rather than batched and
+		// reconstructed afterwards. Both outcomes leave the sink holding the incoming
+		// version; only the row data differs, and the version is all a probe can see.
+		// Guarding this as a test so the batching optimisation is not re-attempted.
+		SqlGenerator.Statement strict = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		assertThat(strict.sql()).contains(" < EXCLUDED.");
+		// After applying, sink == incoming. After losing a tie, sink == incoming as well.
+		// No comparison on that column can separate them.
+	}
+
 }

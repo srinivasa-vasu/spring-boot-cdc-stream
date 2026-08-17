@@ -314,11 +314,17 @@ public class ChangeEventApplier {
 
 	private void execute(ApplyLane lane, SqlGenerator.Statement statement, List<ChangeRow> run) {
 		try {
-			if (run.size() == 1) {
-				ChangeRow row = run.getFirst();
-				int affected = lane.jdbcTemplate().update(statement.sql(), ps -> bind(ps, statement, row));
-				if (affected == 0) {
-					classify(lane, row);
+			// A guarded statement is executed row by row. Whether the guard accepted a
+			// change cannot be recovered afterwards: an applied row and a row that lost a
+			// tie both leave the sink holding the incoming version, differing only in the
+			// data. And with reWriteBatchedInserts the driver collapses a batch and reports
+			// no per-row counts at all. Per-row execution makes the affected count
+			// authoritative, which is the only way the conflict log can be trusted.
+			if (run.size() == 1 || guarded(run.getFirst())) {
+				for (ChangeRow row : run) {
+					if (lane.jdbcTemplate().update(statement.sql(), ps -> bind(ps, statement, row)) == 0) {
+						classify(lane, row);
+					}
 				}
 				return;
 			}
@@ -333,9 +339,7 @@ public class ChangeEventApplier {
 					return run.size();
 				}
 			});
-			if (!allApplied(counts, run.size())) {
-				findLosers(lane, run);
-			}
+			findLosers(lane, run, counts);
 		}
 		catch (RuntimeException e) {
 			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.getFirst().op(),
@@ -344,81 +348,27 @@ public class ChangeEventApplier {
 		}
 	}
 
-	/**
-	 * Whether the batch accounted for every row.
-	 *
-	 * <p>
-	 * Returns false when any count is {@code SUCCESS_NO_INFO} as well as when the total
-	 * falls short. With {@code reWriteBatchedInserts} the driver collapses a batch into one
-	 * multi-row statement and reports no per-row counts at all, so "cannot tell" has to be
-	 * treated the same as "something was rejected" — the alternative is missing losers
-	 * silently, which is the whole failure this exists to prevent.
-	 */
-	private static boolean allApplied(int[] counts, int expected) {
-		int accounted = 0;
-		for (int count : counts) {
-			if (count < 0) {
-				return false;
-			}
-			accounted += count;
-		}
-		return accounted >= expected;
+	/** Whether this table applies changes under a last-writer-wins guard. */
+	private boolean guarded(ChangeRow row) {
+		return guardFor(row) != null;
 	}
 
 	/**
-	 * Second phase: work out which rows of the batch applied to nothing.
+	 * Reports the rows of an unguarded batch that applied to nothing.
 	 *
 	 * <p>
-	 * Deliberately a <em>read-only</em> probe rather than re-running the statement. Replaying
-	 * with a relaxed comparison would tell an applied row from a rejected one, but it would
-	 * also re-apply any row that lost a tie — silently undoing the decision the tiebreak had
-	 * just made. A probe cannot change the outcome it is measuring.
-	 *
-	 * <p>
-	 * Only reached when the batch could not account for every row, so the common case pays
-	 * nothing.
+	 * Driven by the per-row counts, which are trustworthy here precisely because the
+	 * statement is unguarded: {@code reWriteBatchedInserts} rewrites inserts only, so an
+	 * update or a delete comes back with real counts, and an unguarded upsert cannot affect
+	 * zero rows in the first place — it would have inserted. Where the driver does report
+	 * {@code SUCCESS_NO_INFO} there is nothing to find, so nothing is probed.
 	 */
-	private void findLosers(ApplyLane lane, List<ChangeRow> run) {
-		for (ChangeRow row : run) {
-			if (row.schema() != null && row.schema().hasKey() && !wasApplied(lane, row)) {
-				classify(lane, row);
+	private void findLosers(ApplyLane lane, List<ChangeRow> run, int[] counts) {
+		for (int i = 0; i < counts.length && i < run.size(); i++) {
+			if (counts[i] == 0) {
+				classify(lane, run.get(i));
 			}
 		}
-	}
-
-	/**
-	 * Asks the sink whether the guard would accept this change, in one statement.
-	 *
-	 * <p>
-	 * Evaluated in SQL with the same comparison the apply used, so it needs no type handling
-	 * of its own — a timestamp read back through JDBC and one converted from the change event
-	 * are not the same Java type, and comparing them here would be a quiet source of wrong
-	 * answers.
-	 * @return false when the row is absent or the guard would refuse, which are the two ways
-	 * a change applies to nothing
-	 */
-	private boolean wasApplied(ApplyLane lane, ChangeRow row) {
-		SqlGenerator.Guard guard = guardFor(row);
-		List<String> keys = row.schema().keyColumns();
-		StringBuilder sql = new StringBuilder("SELECT ");
-		List<Object> args = new ArrayList<>();
-		if (guard == null || !row.values().containsKey(guard.column())) {
-			sql.append("true");
-		}
-		else {
-			sql.append(TableId.quote(guard.column())).append(guard.comparison()).append('?');
-			args.add(row.values().get(guard.column()));
-		}
-		sql.append(" FROM ").append(row.table().qualified()).append(" WHERE ");
-		for (int i = 0; i < keys.size(); i++) {
-			sql.append(i == 0 ? "" : " AND ").append(TableId.quote(keys.get(i))).append(" = ?");
-			args.add(row.values().get(keys.get(i)));
-		}
-		Boolean accepted = lane.jdbcTemplate().query(sql.toString(),
-				rs -> rs.next() ? rs.getBoolean(1) : null, args.toArray());
-		// Absent row: a delete succeeded, or an update had nothing to act on. Either way it
-		// did not apply, and classify() decides which of those it was.
-		return Boolean.TRUE.equals(accepted);
 	}
 
 	/**
