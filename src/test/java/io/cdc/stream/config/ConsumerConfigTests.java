@@ -31,4 +31,48 @@ class ConsumerConfigTests {
 		assertThatCode(new ConsumerConfig()::validate).doesNotThrowAnyException();
 	}
 
+
+	@Test
+	void tiesAreLeftToDivergeUnlessATiebreakIsConfigured() {
+		assertThat(new ConsumerConfig().incomingWinsTies()).isFalse();
+	}
+
+	@Test
+	void theTwoSidesSettleATieOppositely() {
+		// The point of the rule: both evaluate the same comparison and reach opposite
+		// answers, so exactly one accepts the tie and they converge on one value.
+		ConsumerConfig a = tiebreak("a", "b");
+		ConsumerConfig b = tiebreak("b", "a");
+
+		assertThat(a.incomingWinsTies()).isTrue();
+		assertThat(b.incomingWinsTies()).isFalse();
+	}
+
+	@Test
+	void identicalNodeIdsAreRejected() {
+		// Both sides would settle a tie the same way and still diverge — the exact failure
+		// the tiebreak exists to prevent, so it must not be configurable.
+		ConsumerConfig config = tiebreak("same", "same");
+
+		assertThatThrownBy(config::validate).isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("must differ");
+	}
+
+	@Test
+	void aTiebreakWithoutIdentifiersIsRejected() {
+		ConsumerConfig config = new ConsumerConfig();
+		config.setConflictTiebreak(ConsumerConfig.ConflictTiebreak.nodeId);
+
+		assertThatThrownBy(config::validate).isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("conflict-node-id");
+	}
+
+	private static ConsumerConfig tiebreak(String node, String peer) {
+		ConsumerConfig config = new ConsumerConfig();
+		config.setConflictTiebreak(ConsumerConfig.ConflictTiebreak.nodeId);
+		config.setConflictNodeId(node);
+		config.setConflictPeerId(peer);
+		return config;
+	}
+
 }

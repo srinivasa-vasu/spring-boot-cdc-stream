@@ -92,6 +92,15 @@ class SqlGeneratorTests {
 
 	// --- fixtures -----------------------------------------------------------
 
+	/** The same table, plus the column a last-writer-wins guard compares. */
+	private static TableSchema versioned() {
+		Map<String, TableSchema.Column> columns = new LinkedHashMap<>();
+		columns.put("id", column("id", Schema.INT64_SCHEMA, "bigint"));
+		columns.put("quantity", column("quantity", Schema.INT32_SCHEMA, "integer"));
+		columns.put("updated_at", column("updated_at", Schema.INT64_SCHEMA, "timestamptz"));
+		return new TableSchema(new TableId("public", "orders"), columns, List.of("id"));
+	}
+
 	private static TableSchema schema() {
 		Map<String, TableSchema.Column> columns = new LinkedHashMap<>();
 		columns.put("id", column("id", Schema.INT64_SCHEMA, "bigint"));
@@ -108,6 +117,68 @@ class SqlGeneratorTests {
 
 	private static TableSchema.Column column(String name, Schema connectSchema, String sqlType) {
 		return new TableSchema.Column(name, connectSchema, sqlType, TypeMapper.placeholder(sqlType));
+	}
+
+
+	@Test
+	@DisplayName("the conflict guard compares the sink row against the incoming one")
+	void upsertGuardComparesAgainstExcluded() {
+		SqlGenerator.Statement guarded = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		// The target row is addressed by the table's own name, which PostgreSQL provides as
+		// the implicit alias in ON CONFLICT. No extra bind: the incoming value is already
+		// among the inserted columns.
+		assertThat(guarded.sql())
+			.contains("WHERE \"orders\".\"updated_at\" < EXCLUDED.\"updated_at\"");
+		assertThat(guarded.bindColumns()).containsExactly("id", "quantity", "updated_at");
+	}
+
+	@Test
+	@DisplayName("the replay form relaxes to <= so an applied row can be told from a rejected one")
+	void replayGuardIsNonStrict() {
+		SqlGenerator.Statement strict = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+		SqlGenerator.Statement replay = generator.upsert(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", false));
+
+		assertThat(strict.sql()).contains(" < EXCLUDED.");
+		assertThat(replay.sql()).contains(" <= EXCLUDED.");
+		// Distinct cache entries, or the second would silently return the first.
+		assertThat(replay.sql()).isNotEqualTo(strict.sql());
+	}
+
+	@Test
+	@DisplayName("a partial update binds the incoming version as an extra parameter")
+	void updateGuardBindsTheVersion() {
+		SqlGenerator.Statement guarded = generator.update(versioned(), List.of("id", "quantity", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		assertThat(guarded.sql()).contains("AND \"updated_at\" < ");
+		// Appended last, after the assignments and the key.
+		assertThat(guarded.bindColumns()).endsWith("updated_at");
+	}
+
+	@Test
+	@DisplayName("a delete is never strict: an equal version still deletes")
+	void deleteGuardIsNonStrict() {
+		SqlGenerator.Statement guarded = generator.delete(versioned(), List.of("id", "updated_at"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		// The version in a before image is what the deleter saw. A sink row that has moved
+		// on holds changes the deleter did not know about; one that is identical has not.
+		assertThat(guarded.sql()).contains("AND \"updated_at\" <= ");
+	}
+
+	@Test
+	@DisplayName("the guard is dropped when the event does not carry the version column")
+	void guardIsDroppedWhenTheColumnIsAbsent() {
+		// A partial image under REPLICA IDENTITY CHANGE may not include it, and there is
+		// then nothing to compare against.
+		SqlGenerator.Statement guarded = generator.upsert(versioned(), List.of("id", "quantity"),
+				new SqlGenerator.Guard("updated_at", true));
+
+		assertThat(guarded.sql()).doesNotContain("updated_at");
 	}
 
 }

@@ -2,6 +2,7 @@ package io.cdc.stream.apply;
 
 import io.cdc.stream.config.ConsumerConfig;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -54,18 +55,21 @@ public class ChangeEventApplier {
 
 	private final SinkPrecondition sinkPrecondition;
 
+	private final ConflictLog conflictLog;
+
 	private final ApplyStateStore stateStore;
 
 	private final ConsumerConfig config;
 
 	public ChangeEventApplier(JdbcTemplate jdbcTemplate, PlatformTransactionManager transactionManager,
 			RetryTemplate retryTemplate, SqlGenerator sqlGenerator, SinkPrecondition sinkPrecondition,
-			ApplyStateStore stateStore, ConsumerConfig config) {
+			ConflictLog conflictLog, ApplyStateStore stateStore, ConsumerConfig config) {
 		this.jdbcTemplate = jdbcTemplate;
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.retryTemplate = retryTemplate;
 		this.sqlGenerator = sqlGenerator;
 		this.sinkPrecondition = sinkPrecondition;
+		this.conflictLog = conflictLog;
 		this.stateStore = stateStore;
 		this.config = config;
 	}
@@ -241,7 +245,24 @@ public class ChangeEventApplier {
 		return key;
 	}
 
+	/**
+	 * This table's last-writer-wins guard, or null when it has none.
+	 *
+	 * <p>
+	 * The strictness carries the tiebreak: {@code <} rejects an equal version, {@code <=}
+	 * accepts it. With {@code conflict-tiebreak=nodeId} the two deployments derive opposite
+	 * answers from the same rule, so exactly one of them accepts a tie and both converge.
+	 */
+	private SqlGenerator.Guard guardFor(ChangeRow row) {
+		String column = sinkPrecondition.conflictColumnOf(row.table());
+		return column == null ? null : new SqlGenerator.Guard(column, !config.incomingWinsTies());
+	}
+
 	private SqlGenerator.Statement statementFor(ChangeRow row) {
+		return statementFor(row, guardFor(row));
+	}
+
+	private SqlGenerator.Statement statementFor(ChangeRow row, SqlGenerator.Guard guard) {
 		TableSchema schema = row.schema();
 		if (schema == null) {
 			return null;
@@ -252,12 +273,12 @@ public class ChangeEventApplier {
 					+ "or remove it from producer.table-list.");
 		}
 		return switch (row.op()) {
-			case c, r -> sqlGenerator.upsert(schema, row.values().keySet());
-			case u -> row.fullImage() ? sqlGenerator.upsert(schema, row.values().keySet())
-					: sqlGenerator.update(schema, requireKey(row));
+			case c, r -> sqlGenerator.upsert(schema, row.values().keySet(), guard);
+			case u -> row.fullImage() ? sqlGenerator.upsert(schema, row.values().keySet(), guard)
+					: sqlGenerator.update(schema, requireKey(row), guard);
 			case d -> {
 				requireKey(row);
-				yield sqlGenerator.delete(schema);
+				yield sqlGenerator.delete(schema, row.values().keySet(), guard);
 			}
 			default -> null;
 		};
@@ -283,13 +304,12 @@ public class ChangeEventApplier {
 			if (run.size() == 1) {
 				ChangeRow row = run.getFirst();
 				int affected = jdbcTemplate.update(statement.sql(), ps -> bind(ps, statement, row));
-				if (affected == 0 && row.op() == io.cdc.stream.event.OPERATION.u) {
-					log.warn("Update for {} key {} matched no sink row; the sink may be missing this row", row.table(),
-							keyOf(row));
+				if (affected == 0) {
+					classify(row);
 				}
 				return;
 			}
-			jdbcTemplate.batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
+			int[] counts = jdbcTemplate.batchUpdate(statement.sql(), new BatchPreparedStatementSetter() {
 				@Override
 				public void setValues(@NonNull PreparedStatement ps, int i) throws SQLException {
 					bind(ps, statement, run.get(i));
@@ -300,12 +320,135 @@ public class ChangeEventApplier {
 					return run.size();
 				}
 			});
+			if (!allApplied(counts, run.size())) {
+				findLosers(run);
+			}
 		}
 		catch (RuntimeException e) {
 			log.error("Failed applying {} {} row(s) to {} (keys: {}) with: {}", run.size(), run.getFirst().op(),
 					run.getFirst().table(), run.stream().map(this::keyOf).limit(20).toList(), statement.sql());
 			throw e;
 		}
+	}
+
+	/**
+	 * Whether the batch accounted for every row.
+	 *
+	 * <p>
+	 * Returns false when any count is {@code SUCCESS_NO_INFO} as well as when the total
+	 * falls short. With {@code reWriteBatchedInserts} the driver collapses a batch into one
+	 * multi-row statement and reports no per-row counts at all, so "cannot tell" has to be
+	 * treated the same as "something was rejected" — the alternative is missing losers
+	 * silently, which is the whole failure this exists to prevent.
+	 */
+	private static boolean allApplied(int[] counts, int expected) {
+		int accounted = 0;
+		for (int count : counts) {
+			if (count < 0) {
+				return false;
+			}
+			accounted += count;
+		}
+		return accounted >= expected;
+	}
+
+	/**
+	 * Second phase: work out which rows of the batch applied to nothing.
+	 *
+	 * <p>
+	 * Deliberately a <em>read-only</em> probe rather than re-running the statement. Replaying
+	 * with a relaxed comparison would tell an applied row from a rejected one, but it would
+	 * also re-apply any row that lost a tie — silently undoing the decision the tiebreak had
+	 * just made. A probe cannot change the outcome it is measuring.
+	 *
+	 * <p>
+	 * Only reached when the batch could not account for every row, so the common case pays
+	 * nothing.
+	 */
+	private void findLosers(List<ChangeRow> run) {
+		for (ChangeRow row : run) {
+			if (row.schema() != null && row.schema().hasKey() && !wasApplied(row)) {
+				classify(row);
+			}
+		}
+	}
+
+	/**
+	 * Asks the sink whether the guard would accept this change, in one statement.
+	 *
+	 * <p>
+	 * Evaluated in SQL with the same comparison the apply used, so it needs no type handling
+	 * of its own — a timestamp read back through JDBC and one converted from the change event
+	 * are not the same Java type, and comparing them here would be a quiet source of wrong
+	 * answers.
+	 * @return false when the row is absent or the guard would refuse, which are the two ways
+	 * a change applies to nothing
+	 */
+	private boolean wasApplied(ChangeRow row) {
+		SqlGenerator.Guard guard = guardFor(row);
+		List<String> keys = row.schema().keyColumns();
+		StringBuilder sql = new StringBuilder("SELECT ");
+		List<Object> args = new ArrayList<>();
+		if (guard == null || !row.values().containsKey(guard.column())) {
+			sql.append("true");
+		}
+		else {
+			sql.append(TableId.quote(guard.column())).append(guard.comparison()).append('?');
+			args.add(row.values().get(guard.column()));
+		}
+		sql.append(" FROM ").append(row.table().qualified()).append(" WHERE ");
+		for (int i = 0; i < keys.size(); i++) {
+			sql.append(i == 0 ? "" : " AND ").append(TableId.quote(keys.get(i))).append(" = ?");
+			args.add(row.values().get(keys.get(i)));
+		}
+		Boolean accepted = jdbcTemplate.query(sql.toString(),
+				rs -> rs.next() ? rs.getBoolean(1) : null, args.toArray());
+		// Absent row: a delete succeeded, or an update had nothing to act on. Either way it
+		// did not apply, and classify() decides which of those it was.
+		return Boolean.TRUE.equals(accepted);
+	}
+
+	/**
+	 * Decides why a change applied to nothing, and records it.
+	 *
+	 * <p>
+	 * An upsert cannot miss for want of a row — it would have inserted one — so zero rows
+	 * means the guard refused it. A partial update or a delete genuinely might have no row
+	 * to act on, which is a different fact and worth distinguishing, so those probe.
+	 * A delete whose row is already gone is not a conflict at all: it simply succeeded, or
+	 * something else removed the row first.
+	 */
+	private void classify(ChangeRow row) {
+		SqlGenerator.Guard guard = guardFor(row);
+		boolean upsert = row.op() != io.cdc.stream.event.OPERATION.d
+				&& (row.fullImage() || row.op() != io.cdc.stream.event.OPERATION.u);
+		if (upsert) {
+			if (guard != null) {
+				conflictLog.record(jdbcTemplate, row, ConflictLog.Reason.stale, row.values().get(guard.column()));
+			}
+			return;
+		}
+		boolean present = present(row);
+		if (row.isDelete()) {
+			if (present) {
+				conflictLog.record(jdbcTemplate, row, ConflictLog.Reason.stale,
+						guard == null ? null : row.values().get(guard.column()));
+			}
+			return;
+		}
+		conflictLog.record(jdbcTemplate, row, present ? ConflictLog.Reason.stale : ConflictLog.Reason.row_missing,
+				guard == null ? null : row.values().get(guard.column()));
+	}
+
+	/** One narrow existence probe, only on the path where a change already applied to nothing. */
+	private boolean present(ChangeRow row) {
+		List<String> keys = row.schema().keyColumns();
+		StringBuilder sql = new StringBuilder("SELECT 1 FROM ").append(row.table().qualified()).append(" WHERE ");
+		for (int i = 0; i < keys.size(); i++) {
+			sql.append(i == 0 ? "" : " AND ").append(TableId.quote(keys.get(i))).append(" = ?");
+		}
+		Object[] args = keys.stream().map(column -> row.values().get(column)).toArray();
+		return Boolean.TRUE.equals(jdbcTemplate.query(sql.toString(), ResultSet::next, args));
 	}
 
 	private void bind(PreparedStatement ps, SqlGenerator.Statement statement, ChangeRow row) throws SQLException {
