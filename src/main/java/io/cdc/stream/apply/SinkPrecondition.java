@@ -76,6 +76,16 @@ public class SinkPrecondition {
 	/** Missing columns last reported per table, so a steady state is not re-warned. */
 	private final Map<TableId, List<String>> reportedMissing = new ConcurrentHashMap<>();
 
+	/**
+	 * The version column each table is guarded on, absent when it has none.
+	 *
+	 * <p>
+	 * Resolved from the column map already fetched for verification, so identifying it
+	 * costs no extra round trip — the types come back from the same
+	 * {@code DatabaseMetaData.getColumns} call.
+	 */
+	private final Map<TableId, String> conflictColumns = new ConcurrentHashMap<>();
+
 	private final ConsumerConfig config;
 
 	public SinkPrecondition(@Qualifier("metadataJdbcTemplate") JdbcTemplate jdbcTemplate, ConsumerConfig config) {
@@ -89,6 +99,14 @@ public class SinkPrecondition {
 	 */
 	Set<String> columnsOf(TableId table) {
 		return knownColumns.get(table);
+	}
+
+	/**
+	 * The column this table's last-writer-wins guard compares, or null when conflict
+	 * resolution is off or the table has no suitable column.
+	 */
+	public String conflictColumnOf(TableId table) {
+		return conflictColumns.get(table);
 	}
 
 	/**
@@ -115,6 +133,7 @@ public class SinkPrecondition {
 		}
 		verifyColumns(schema, sink);
 		verifyConflictTarget(schema);
+		resolveConflictColumn(schema, sink);
 		verified.put(schema.table(), schema.fingerprint());
 		if (sameShape) {
 			// A recheck of a shape already seen: only interesting if something changed,
@@ -204,6 +223,49 @@ public class SinkPrecondition {
 	}
 
 	/**
+	 * Picks the table's version column: an explicit override, else the first configured
+	 * candidate that exists with a time-like type.
+	 *
+	 * <p>
+	 * Reported per table at startup, because "some tables are guarded" is a materially
+	 * different posture from "all are" and the difference is otherwise invisible.
+	 */
+	private void resolveConflictColumn(TableSchema schema, Map<String, String> sink) {
+		if (config.getConflictResolution() != ConsumerConfig.ConflictResolution.timestamp) {
+			return;
+		}
+		String override = config.getConflictColumnOverrides().get(schema.table().toString());
+		if (override != null) {
+			if (!sink.containsKey(override)) {
+				throw new UnrecoverableApplyException(String.format(
+						"consumer.conflict-column-overrides names '%s' for %s, but the sink table has no such column.",
+						override, schema.table()));
+			}
+			conflictColumns.put(schema.table(), override);
+			log.info("Conflict resolution on {} compares '{}' (configured override)", schema.table(), override);
+			return;
+		}
+		for (String candidate : config.getConflictColumns()) {
+			String type = sink.get(candidate);
+			if (type != null && isTimeLike(type)) {
+				conflictColumns.put(schema.table(), candidate);
+				log.info("Conflict resolution on {} compares '{}' ({})", schema.table(), candidate, type);
+				return;
+			}
+		}
+		conflictColumns.remove(schema.table());
+		log.warn("Conflict resolution is enabled but {} has none of {} with a time-like type, so its changes are "
+				+ "applied unconditionally — last arrival wins for this table.", schema.table(),
+				config.getConflictColumns());
+	}
+
+	/** Timestamps and dates, plus an epoch stored as an integer. */
+	private static boolean isTimeLike(String sqlType) {
+		String type = sqlType.toLowerCase();
+		return type.contains("timestamp") || type.equals("date") || type.equals("bigint") || type.equals("int8");
+	}
+
+	/**
 	 * Checks that the sink has a unique constraint on exactly the key columns the upsert
 	 * names in {@code ON CONFLICT}. Without one PostgreSQL raises {@code 42P10}, which
 	 * Spring surfaces as {@code BadSqlGrammarException} — the statement looks perfectly
@@ -273,6 +335,7 @@ public class SinkPrecondition {
 		knownColumns.remove(table);
 		recheckAfter.remove(table);
 		reportedMissing.remove(table);
+		conflictColumns.remove(table);
 	}
 
 }

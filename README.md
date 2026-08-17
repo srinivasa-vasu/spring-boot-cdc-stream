@@ -325,6 +325,122 @@ do. A sink column that is deliberately *wider* than the source is fine and is no
 The check is not retryable — no amount of waiting adds a missing column — so it halts the
 pipeline with `UnrecoverableApplyException` rather than burning through the backoff.
 
+### Conflict resolution
+
+Off by default. With `consumer.conflict-resolution: none` every change is applied
+unconditionally — **last arrival wins**. In a bidirectional topology that means two clusters
+writing the same key concurrently end up holding different values, permanently: each applies
+the other's change last, and no further events exist to reconcile them.
+
+`timestamp` applies a change only when the sink row is older, compared on a column the table
+**already has**:
+
+```yaml
+consumer:
+  conflict-resolution: timestamp
+  conflict-columns: [updated_at, modified_at, last_modified, updated_on]
+  conflict-column-overrides:
+    public.orders: modified_on
+```
+
+This works with no schema change and no trigger because the column is **in the row**. A local
+write on the sink maintains it exactly as a replicated write does, so the comparison always
+reads the row's real current version. Every out-of-band alternative — a version column the
+pipeline owns, a side table keyed by row — is blind to direct local writes and would need a
+trigger on every replicated table to close that hole.
+
+Identifying the column per table costs nothing. `SinkPrecondition` already reads
+`DatabaseMetaData.getColumns` for its own checks and caches the result, so the first candidate
+present with a time-like type is picked from data already in hand. Each table logs which
+column guards it, and a table matching none logs that it is applied unconditionally — "some
+tables are guarded" is a very different posture from "all are", and the difference is
+otherwise invisible.
+
+The guard becomes part of the statement:
+
+```sql
+-- upsert: no extra bind, the incoming value is already being inserted
+DO UPDATE SET ... WHERE "orders"."updated_at" < EXCLUDED."updated_at"
+-- partial update: version bound as a parameter
+UPDATE ... WHERE "id" = ? AND "updated_at" < ?
+-- delete: never strict
+DELETE ... WHERE "id" = ? AND "updated_at" <= ?
+```
+
+Delete is deliberately non-strict. The before image carries the version the *deleter* saw, so
+a sink row that has moved on since holds changes the deleter did not know about and survives;
+one that is identical has not, and goes.
+
+**With parallel lanes this needs no extra coordination.** Kafka partitions by message key, so
+a given key always lands on one partition, one listener thread and therefore one apply lane —
+two lanes never contend for the same row. The comparison is a single compare-and-apply
+statement in any case, so it is atomic even where that affinity does not hold.
+
+#### Ties
+
+Equal versions diverge if left alone — each side rejects the other's change and keeps its own.
+Flipping the comparison to accept ties diverges just as badly, in the other direction.
+
+`conflict-tiebreak: nodeId` settles it with a rule both sides evaluate to the same answer: the
+change from the higher node id wins. Give each deployment a distinct id, **mirrored** — see
+`application-a2b.yml` and `application-b2a.yml`, which are exactly this pair:
+
+```yaml
+# a2b                          # b2a
+conflict-tiebreak: nodeId      conflict-tiebreak: nodeId
+conflict-node-id: a            conflict-node-id: b
+conflict-peer-id: b            conflict-peer-id: a
+```
+
+Identical ids are rejected at startup. **Un-mirrored ids are not**, and cannot be: from either
+side in isolation `node=a, peer=b` is legitimate config, and nothing compares the two
+deployments. Getting this wrong has both sides settle ties the same way and diverge anyway, so
+it is worth checking by hand.
+
+This is **pairwise only**. Settling ties among three or more writers needs the originating node
+in the change event, which nothing in the payload carries.
+
+#### Rejected changes
+
+A rejection is a real edit being discarded. Even when the decision was right, that fact is
+often business-relevant, so it is never silent:
+
+| `conflict-log` | Behaviour |
+|---|---|
+| `false` (default) | Rate-limited warning, one per 1000 rejections |
+| `true` | A row in `consumer.conflict-log-table` with the key, the full payload, the incoming version, the reason, and the source transaction |
+
+It is a conflict **log**, not a dead-letter queue — nothing there should be replayed, since
+last-writer-wins already adjudicated and re-applying a loser would undo the winner. Retention
+is safe to prune: unlike a version store, nothing in it is load-bearing for correctness. The
+row is written through the lane's own connection, inside the row transaction, so a rolled-back
+apply cannot leave a rejection recorded for something that never happened.
+
+Two reasons are recorded. `stale` means the guard refused it; `row_missing` means there was no
+row to update, which was previously only a log line. An upsert can never be `row_missing` — it
+would have inserted — so that case is decided without a probe.
+
+Finding the rejected rows inside a JDBC batch takes a second pass, and only when the batch
+could not account for every row. With `reWriteBatchedInserts` the driver collapses a batch into
+one statement and reports no per-row counts, so "cannot tell" is treated the same as "something
+was rejected" — the alternative is losing losers silently. The second pass is a **read-only**
+probe rather than a re-run: replaying a row that lost a tie would re-apply it and undo the
+decision, so the measurement must not be able to change the outcome. The probe evaluates the
+comparison in SQL, because a timestamp read back through JDBC and one converted from a change
+event are not the same Java type.
+
+#### What you are assuming
+
+- **The application sets the column on every UPDATE.** A `DEFAULT now()` fires only on insert.
+  A code path that forgets leaves the version frozen and lets a stale change win.
+- **Clocks are close enough.** The comparison is wall-clock across clusters, bounded by skew —
+  the same basis xCluster uses for its own last-writer-wins.
+- **Deletes can still resurrect.** Once a row is gone so is its version, so a late-arriving
+  older insert recreates it. Only soft deletes close that.
+- **Partial images must carry the column.** Under `REPLICA IDENTITY CHANGE` an update that did
+  not touch it has nothing to compare, and the guard is dropped for that statement. With
+  `REPLICA IDENTITY FULL` on the connector this does not arise.
+
 ### Adding a table to the capture set
 
 Only **streaming** works for a table added later. An existing slot will start delivering

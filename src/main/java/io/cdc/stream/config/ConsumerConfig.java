@@ -1,6 +1,10 @@
 package io.cdc.stream.config;
 
 import jakarta.annotation.PostConstruct;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import lombok.Getter;
@@ -217,6 +221,105 @@ public class ConsumerConfig {
 	}
 
 	/**
+	 * Last-writer-wins conflict resolution.
+	 *
+	 * <p>
+	 * {@code none} applies every change unconditionally — last <em>arrival</em> wins, which
+	 * in a bidirectional topology lets two clusters diverge permanently when the same key is
+	 * written on both sides.
+	 *
+	 * <p>
+	 * {@code timestamp} applies a change only when the sink row is older, compared on a
+	 * column the table already has. That works precisely because the column is <em>in the
+	 * row</em>: a local write on the sink maintains it just as a replicated write does, so
+	 * unlike any out-of-band version store it needs no trigger. It rests on the application
+	 * genuinely setting that column on every update — a {@code DEFAULT now()} fires only on
+	 * insert.
+	 */
+	private ConflictResolution conflictResolution = ConflictResolution.none;
+
+	/**
+	 * Candidate version columns, tried in order. The first that exists on a table with a
+	 * time-like type becomes that table's guard; a table matching none is applied
+	 * unconditionally, and says so at startup.
+	 */
+	private List<String> conflictColumns = new ArrayList<>(
+			List.of("updated_at", "modified_at", "last_modified", "updated_on"));
+
+	/** Per-table escape hatch, keyed {@code schema.table}, for tables naming it otherwise. */
+	private Map<String, String> conflictColumnOverrides = new LinkedHashMap<>();
+
+	/**
+	 * Record rejected changes in {@code conflictLogTable} rather than only logging them.
+	 *
+	 * <p>
+	 * A rejection is a real write that lost — someone's edit was discarded. Off, that fact
+	 * survives only as a log line; on, it is queryable and can be reconciled. Note this is a
+	 * conflict <em>log</em>, not a dead-letter queue: nothing here should be replayed, since
+	 * last-writer-wins already decided.
+	 */
+	private boolean conflictLog;
+
+	/** Created in {@code applyStateSchema} alongside the watermark table. */
+	private String conflictLogTable = "cdc_conflict_log";
+
+	/**
+	 * How to settle a tie, when the incoming change and the sink row carry the same version.
+	 *
+	 * <p>
+	 * Ties are not a curiosity; left unsettled they diverge permanently. Each side rejects
+	 * the other's change and keeps its own, so the two clusters end up holding different
+	 * values with no further events to reconcile them. Flipping the comparison to accept
+	 * ties diverges just as badly, in the other direction.
+	 *
+	 * <p>
+	 * {@code nodeId} settles it with a rule both sides evaluate to the same answer: the
+	 * change from the higher node id wins. Because the identifiers are fixed and differ, one
+	 * side accepts the tie and the other rejects it, and both converge on the same value.
+	 *
+	 * <p>
+	 * This assumes a <em>pairwise</em> topology. Settling ties among three or more writers
+	 * needs the originating node in the change event itself, which nothing here carries.
+	 */
+	private ConflictTiebreak conflictTiebreak = ConflictTiebreak.none;
+
+	/** This deployment's identifier. Required when {@link #conflictTiebreak} is on. */
+	private String conflictNodeId;
+
+	/** The other deployment's identifier. Must differ from {@link #conflictNodeId}. */
+	private String conflictPeerId;
+
+	/** See {@link #conflictTiebreak}. */
+	public enum ConflictTiebreak {
+
+		/** Leave ties to the comparison, which means they diverge. */
+		none,
+		/** The change from the higher node id wins. */
+		nodeId
+
+	}
+
+	/**
+	 * Whether an incoming change should win a tie, which is exactly whether the comparison
+	 * is {@code <=} rather than {@code <}. The strictness of the guard <em>is</em> the
+	 * tiebreak — no extra predicate, no extra bind.
+	 */
+	public boolean incomingWinsTies() {
+		return conflictTiebreak == ConflictTiebreak.nodeId && conflictPeerId != null && conflictNodeId != null
+				&& conflictPeerId.compareTo(conflictNodeId) > 0;
+	}
+
+	/** See {@link #conflictResolution}. */
+	public enum ConflictResolution {
+
+		/** Apply everything; last arrival wins. */
+		none,
+		/** Apply only when the sink row is older, on a time-like column. */
+		timestamp
+
+	}
+
+	/**
 	 * Size of the secondary pool used for the sink precondition check —
 	 * {@code DatabaseMetaData} reads. Separate from the apply pool because that one is
 	 * pinned to a single connection to hold the replication origin, and metadata reads
@@ -245,6 +348,16 @@ public class ConsumerConfig {
 		isTrue(maxBufferedRows >= batchSize, "consumer.max-buffered-rows must be greater than consumer.batch-size");
 		isTrue(metadataPoolSize >= 1, "consumer.metadata-pool-size must be at least 1");
 		isTrue(sinkRecheckIntervalMs > 0, "consumer.sink-recheck-interval-ms must be greater than 0");
+		if (conflictTiebreak == ConflictTiebreak.nodeId) {
+			isTrue(conflictNodeId != null && !conflictNodeId.isBlank() && conflictPeerId != null
+					&& !conflictPeerId.isBlank(),
+					"consumer.conflict-tiebreak=nodeId requires both consumer.conflict-node-id and "
+							+ "consumer.conflict-peer-id");
+			isTrue(!conflictNodeId.equals(conflictPeerId),
+					"consumer.conflict-node-id and consumer.conflict-peer-id must differ, or both sides would settle "
+							+ "a tie the same way and still diverge");
+		}
+
 	}
 
 }
